@@ -42,16 +42,31 @@ gates:
     type: hard
     enabled: true
     params:
-      allow: [politics, sports_major, crypto, macro]
+      # 'sports' is the legacy bucket — markets categorised before the
+      # sports_major/sports_other split. Keep it allowed so the bot doesn't
+      # blackhole 987 already-categorised markets until the next market_ingest
+      # pass re-tags them. Drop 'sports' once market_ingest has re-classified.
+      #
+      # sports_other (tennis, eSports, MMA, lower-tier soccer etc.) is DROPPED
+      # in production: smart-money correlation on these markets is mostly
+      # noise — random co-trades on tennis matches don't represent edge.
+      # Re-add only after observing repeatable positive PnL in that bucket.
+      allow: [politics, sports, sports_major, crypto, macro]
 
   # 2. Wallet quality — production floor. Sharps below 50% win-rate on a
   #    30d window are usually directionally random; we'd rather skip than fade.
+  # wallet_quality: filters on REALISED win-rate (genuine skill metric, from
+  # Polymarket /positions). Sharpe is intentionally NOT used as a hard floor
+  # — our `_daily_sharpe` measures daily BUY-vs-SELL cash flow direction, not
+  # skill, and accumulating wallets correctly score negative on that metric.
+  # `max_negative_sharpe` defaults to -inf (disabled). Set to e.g. -3 only if
+  # you actually observe broken-wallet outliers in the audit log.
   - name: wallet_quality
     type: hard
     enabled: true
     params:
       min_avg_win_rate: 0.50
-      min_avg_sharpe: 0.0
+      # max_negative_sharpe: -3.0    # uncomment to filter extreme Sharpe outliers
       window: "30d"
 
   # 3. Book depth — require enough liquidity to fill a real test order and
@@ -60,8 +75,11 @@ gates:
     type: hard
     enabled: true
     params:
-      min_book_depth_usdc: 200
-      max_slippage_pct: 3.0
+      # 75 USDC = 3× our $25 paper position size — sane safety margin without
+      # rejecting every long-tail sport market. Raise to 200+ once we want
+      # strict liquidity discipline (live mode).
+      min_book_depth_usdc: 75
+      max_slippage_pct: 4.0
 
   # 4. Risk/reward — refuse the extreme tails of the price curve where
   #    expected value is dominated by fee + slippage cost.
@@ -69,7 +87,11 @@ gates:
     type: hard
     enabled: true
     params:
-      min_rr: 0.7
+      # min_rr=0.3 allows buying at up to ~77% probability — most "smart
+      # money agrees" clusters live in the 60-80% range because that's where
+      # conviction crystallises. min_rr=0.7 was too strict and was killing
+      # ~96% of survivors. Raise back to 0.7+ for risk-management-tighter mode.
+      min_rr: 0.3
       max_entry_price: 0.92
       min_entry_price: 0.04
 
@@ -88,7 +110,11 @@ gates:
     type: hard
     enabled: true
     params:
-      min_score: 0.25
+      # 0.05 = let weak clusters through during testing; mean cluster score
+      # is ~0.07 with our defaults, so even 0.10 would filter most. Raise to
+      # 0.20+ once you've seen enough fills to know what "high conviction"
+      # looks like in your dataset.
+      min_score: 0.05
       min_wallets: 2
 
   # 7. Cool-down — avoid re-firing the same market on every tick.

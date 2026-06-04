@@ -70,7 +70,7 @@ async def pipeline_health(
             text(
                 """
                 SELECT
-                    COUNT(*) FILTER (WHERE ts >= NOW() - INTERVAL :win) AS cnt,
+                    COUNT(*) FILTER (WHERE ts >= NOW() - (:win)::interval) AS cnt,
                     MAX(ts)                                              AS last_ts,
                     EXTRACT(EPOCH FROM (NOW() - MAX(ts)))                AS lag_s
                 FROM trades
@@ -86,8 +86,8 @@ async def pipeline_health(
             text(
                 """
                 SELECT
-                    COUNT(*) FILTER (WHERE ts >= NOW() - INTERVAL :win)                       AS cnt,
-                    COUNT(*) FILTER (WHERE ts >= NOW() - INTERVAL :win AND gate_pass IS TRUE) AS pass_cnt,
+                    COUNT(*) FILTER (WHERE ts >= NOW() - (:win)::interval)                       AS cnt,
+                    COUNT(*) FILTER (WHERE ts >= NOW() - (:win)::interval AND gate_pass IS TRUE) AS pass_cnt,
                     MAX(ts)                                                                   AS last_ts
                 FROM signals
                 """
@@ -101,7 +101,7 @@ async def pipeline_health(
             text(
                 """
                 SELECT
-                    COUNT(*) FILTER (WHERE ts >= NOW() - INTERVAL :win) AS cnt,
+                    COUNT(*) FILTER (WHERE ts >= NOW() - (:win)::interval) AS cnt,
                     MAX(ts)                                              AS last_ts
                 FROM fills
                 """
@@ -178,7 +178,7 @@ async def gates_summary(
                 """
                 SELECT gate_results, gate_pass
                 FROM signals
-                WHERE ts >= NOW() - INTERVAL :win
+                WHERE ts >= NOW() - (:win)::interval
                 """
             ),
             {"win": window},

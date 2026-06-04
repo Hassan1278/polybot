@@ -17,6 +17,7 @@ from services.api.routes import (
     markets,
     pipeline,
     pnl,
+    positions,
     signals,
     wallets,
     ws,
@@ -51,4 +52,5 @@ app.include_router(pnl.router,     prefix="/pnl",             tags=["pnl"])
 app.include_router(correlation.router, prefix="/correlation", tags=["correlation"])
 app.include_router(admin.router,   prefix="/admin",           tags=["admin"])
 app.include_router(pipeline.router, prefix="/pipeline",       tags=["pipeline"])
+app.include_router(positions.router, prefix="/positions",     tags=["positions"])
 app.include_router(ws.router)                                 # /ws

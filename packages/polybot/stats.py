@@ -40,14 +40,21 @@ EPS = 0.01                  # USDC rounding noise
 # Half-life (seconds) for the recency weight in `cluster_active_wallets`.
 # A trade `half_life_seconds` old contributes 0.5 to the recency average,
 # `2*half_life_seconds` old contributes 0.25, etc.
-DEFAULT_HALF_LIFE_SECONDS: float = 300.0   # 5 minutes
+#
+# IMPORTANT: this must be aligned with the trade_ingest poll interval
+# (currently 15 min). If half-life << poll-interval, every trade we observe
+# is already "old" and the score collapses to near zero before any gate can
+# evaluate it. 900 s = 15 min keeps fresh-cycle trades weighted ~0.50-1.00.
+DEFAULT_HALF_LIFE_SECONDS: float = 900.0   # 15 minutes (matches trade_ingest)
 
 # Saturation constants for the wallet-count and notional sub-scores.
 # `1 - exp(-x / k)` saturates around 0.86 when x = 2k and ~0.95 when x = 3k.
-# k_wallets = 2.5  → 5 distinct wallets ≈ 0.86
-# k_notional = 2000 USDC → 4_000 USDC ≈ 0.86
-DEFAULT_K_WALLETS: float = 2.5
-DEFAULT_K_NOTIONAL: float = 2_000.0
+# k_wallets = 2.0  → 4 distinct wallets ≈ 0.86 (production sweet spot)
+# k_notional = 500 USDC → 1_000 USDC ≈ 0.86 (most clusters are small;
+#                                            the OLD 2000 cap meant typical
+#                                            cluster contributed <0.10 → too low)
+DEFAULT_K_WALLETS: float = 2.0
+DEFAULT_K_NOTIONAL: float = 500.0
 
 # ── sizing defaults ─────────────────────────────────────────────────────────
 # Multiplier clamp for `position_size_from_score`: never less than 0.25× the

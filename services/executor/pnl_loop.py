@@ -1,11 +1,17 @@
-"""Every minute, snapshot equity / realized / unrealized PnL."""
+"""Every minute, snapshot equity / realized / unrealized PnL.
+
+Also runs market settlement for paper-mode: any open PAPER position whose
+underlying market has resolved is closed at $1 (winning outcome) or $0
+(losing outcome). Without this, paper positions sit in unrealized forever
+because the bot has no SELL-signal generator.
+"""
 
 from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 
 from polybot import alerts
 from polybot.clients import ClobClient
@@ -14,6 +20,7 @@ from polybot.db import session_scope
 from polybot.logging import get_logger
 from polybot.models import Fill, Market, PnLSnapshot, Position
 from polybot.redis_bus import client as _redis_client
+from services.executor.paper import settle_resolved_markets
 
 _DRAWDOWN_FLAG_KEY = "polybot:alerts:pnl_drawdown_15"
 _DRAWDOWN_FLAG_TTL = 3600  # 1 hour
@@ -30,8 +37,20 @@ async def _equity_paper() -> tuple[float, float, float, int]:
             .join(Market, Market.market_id == Position.market_id)
             .where(Position.wallet == "PAPER")
         )).all()
+        # Net cash spent on positions (BUYs reduce bank, SELLs grow it).
+        # Use SQL CASE so the sign is evaluated per-row in the DB. The old
+        # version used a Python ternary on `Fill.side == "BUY"` (a SQLAlchemy
+        # Column expression) which evaluates `__bool__` once at query build
+        # time → always False → the sign collapsed to -1 for every row,
+        # systematically overstating paper equity by 2× the BUY total.
         cash_used = (await s.execute(
-            select(func.coalesce(func.sum(Fill.notional_usdc * (1 if Fill.side == "BUY" else -1)), 0.0))
+            select(func.coalesce(
+                func.sum(case(
+                    (Fill.side == "BUY",  Fill.notional_usdc + Fill.fee_usdc),
+                    else_=(-Fill.notional_usdc + Fill.fee_usdc),
+                )),
+                0.0,
+            ))
             .where(Fill.mode == "paper")
         )).scalar_one()
 
@@ -63,7 +82,24 @@ async def _equity_paper() -> tuple[float, float, float, int]:
 async def pnl_loop() -> None:
     while True:
         try:
+            # Settle any resolved markets before the snapshot so today's
+            # realized line is current. Paper-mode only — live positions
+            # settle on-chain.
             if settings.trading_mode == "paper":
+                try:
+                    settled = await settle_resolved_markets()
+                    if settled:
+                        log.info("paper_settlements_applied", n=len(settled))
+                        for s_ in settled:
+                            await alerts.notify(
+                                "info",
+                                "Paper position settled",
+                                f"market={s_['market_id'][:18]} outcome={s_['outcome']} "
+                                f"settled_price={s_['settled_price']} shares={s_['shares']:.0f}",
+                            )
+                except Exception:  # noqa: BLE001
+                    log.exception("paper_settle_failed")
+
                 equity, realised, unrealised, n = await _equity_paper()
             else:
                 # Live equity is read from the chain — for now, mirror realized fills

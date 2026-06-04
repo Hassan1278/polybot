@@ -62,16 +62,27 @@ export default function PipelinePage() {
         )}
       </header>
 
+      <p className="text-muted text-xs max-w-3xl">
+        <span className="text-text">Wallet trades / min</span> = activity of the
+        ~80 tracked Polymarket wallets (our intel source).{" "}
+        <span className="text-text">Signals / min</span> = correlation clusters
+        our engine produces.{" "}
+        <span className="text-text">Pass rate</span> = % of clusters that survive
+        the 8-gate chain.{" "}
+        <span className="text-text">Fills / min</span> = orders WE actually
+        placed (paper or live).
+      </p>
+
       <section className="grid grid-cols-4 gap-4">
         <Stat
-          k="Trades / min"
+          k="Wallet trades / min"
           v={fmtNum(health?.trades_per_min_15m)}
           pill={
             <StatusPill
               value={health?.trades_per_min_15m}
               green={1}
               yellow={0.1}
-              label={health?.trades_per_min_15m != null ? "rate" : "—"}
+              label={health?.trades_per_min_15m != null ? "tracked" : "—"}
             />
           }
         />
