@@ -1,0 +1,14 @@
+[Unit]
+Description=Polybot Docker stack
+After=docker.service network-online.target
+Requires=docker.service network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/polybot
+ExecStart=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+ExecStop=/usr/bin/docker compose -f docker-compose.yml -f docker-compose.prod.yml down
+
+[Install]
+WantedBy=multi-user.target

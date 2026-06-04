@@ -1,0 +1,108 @@
+# Gate chain — production-ish defaults: strict enough to be meaningful, loose
+# enough to actually fire on a healthy DB. Each gate is reloaded by the signals
+# service every 60 s, so tweaks here are picked up without a restart.
+#
+# ---------------------------------------------------------------------------
+# TUNING GUIDE
+# ---------------------------------------------------------------------------
+# few-signals-fire-more (pipeline is too quiet):
+#   - Add `sports_other` to `category_match.allow` (broadens coverage a lot).
+#   - Drop `wallet_quality.min_avg_win_rate` from 0.50 -> 0.40.
+#   - Lower `liquidity.min_book_depth_usdc` (e.g. 200 -> 75) and raise
+#     `max_slippage_pct` (3.0 -> 5.0).
+#   - Lower `correlation_score.min_score` (0.25 -> 0.10) and `min_wallets` (2 -> 1).
+#   - Shorten `cooldown.cooldown_minutes_per_market` (10 -> 3).
+#   - Widen `risk_reward` price band (e.g. 0.02 .. 0.97).
+#
+# too-many-signals-fire-fewer (alert spam / low conviction firing):
+#   - Trim `category_match.allow` to the highest-conviction buckets (e.g.
+#     [politics, sports_major] only).
+#   - Raise `wallet_quality.min_avg_win_rate` 0.50 -> 0.58 and require
+#     `min_avg_sharpe` >= 0.5.
+#   - Raise `liquidity.min_book_depth_usdc` (200 -> 500) and tighten
+#     `max_slippage_pct` (3.0 -> 1.5).
+#   - Raise `correlation_score.min_score` (0.25 -> 0.40) and `min_wallets` (2 -> 3).
+#   - Lengthen `cooldown.cooldown_minutes_per_market` (10 -> 30).
+#
+# risk-management-tighter (protect capital, accept fewer fires):
+#   - Disable `sports_other` in allow-list (already the default).
+#   - `wallet_quality`: min_avg_win_rate >= 0.55, min_avg_sharpe >= 0.5.
+#   - `liquidity`: min_book_depth_usdc >= 500, max_slippage_pct <= 1.5.
+#   - `risk_reward`: min_rr >= 1.0, max_entry_price <= 0.85, min_entry_price >= 0.08.
+#   - `timeframe`: max_hours_to_resolve <= 168 (1 week) to avoid stale theses.
+#   - `opposing_smart_money.penalty`: raise to 0.40+ to demote contested setups.
+# ---------------------------------------------------------------------------
+
+gates:
+
+  # 1. Market must belong to a tracked category.
+  #    sports_other is intentionally excluded by default — too noisy.
+  #    Add it back if you want broader coverage (see "few-signals-fire-more").
+  - name: category_match
+    type: hard
+    enabled: true
+    params:
+      allow: [politics, sports_major, crypto, macro]
+
+  # 2. Wallet quality — production floor. Sharps below 50% win-rate on a
+  #    30d window are usually directionally random; we'd rather skip than fade.
+  - name: wallet_quality
+    type: hard
+    enabled: true
+    params:
+      min_avg_win_rate: 0.50
+      min_avg_sharpe: 0.0
+      window: "30d"
+
+  # 3. Book depth — require enough liquidity to fill a real test order and
+  #    not blow the spread doing it.
+  - name: liquidity
+    type: hard
+    enabled: true
+    params:
+      min_book_depth_usdc: 200
+      max_slippage_pct: 3.0
+
+  # 4. Risk/reward — refuse the extreme tails of the price curve where
+  #    expected value is dominated by fee + slippage cost.
+  - name: risk_reward
+    type: hard
+    enabled: true
+    params:
+      min_rr: 0.7
+      max_entry_price: 0.92
+      min_entry_price: 0.04
+
+  # 5. Time-frame — accept anything from 15 minutes to 30 days out.
+  #    Tighten the upper bound for risk-management-tighter mode.
+  - name: timeframe
+    type: hard
+    enabled: true
+    params:
+      min_hours_to_resolve: 0.25
+      max_hours_to_resolve: 720       # 30 days
+
+  # 6. Correlation strength — require a meaningful cluster of sharps,
+  #    not a single wallet that happens to be tagged.
+  - name: correlation_score
+    type: hard
+    enabled: true
+    params:
+      min_score: 0.25
+      min_wallets: 2
+
+  # 7. Cool-down — avoid re-firing the same market on every tick.
+  - name: cooldown
+    type: hard
+    enabled: true
+    params:
+      cooldown_minutes_per_market: 10
+
+  # 8. Soft gate — if sharp money is also on the OTHER side within the
+  #    check window, demote the signal score by `penalty` (do not block).
+  - name: opposing_smart_money
+    type: soft
+    enabled: true
+    params:
+      penalty: 0.20
+      check_window_minutes: 60

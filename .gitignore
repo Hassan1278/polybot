@@ -1,0 +1,45 @@
+# env / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+dist/
+build/
+
+# node / next
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+
+# data
+data/local/
+*.sqlite3
+*.db
+backups/
+
+# editor
+.vscode/
+.idea/
+*.swp
+
+# os
+.DS_Store
+Thumbs.db
+
+# docker
+.docker/

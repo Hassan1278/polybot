@@ -1,0 +1,121 @@
+name: polybot
+
+# Production overrides — merged onto docker-compose.yml with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Differences vs dev:
+#  - No source-mount volumes (immutable images)
+#  - Uvicorn workers, no --reload
+#  - Caddy reverse proxy w/ auto-TLS
+#  - Hardened pg / redis (bind to docker network only)
+#  - Per-service CPU/memory resource limits
+#  - Daily pg_dump backups via a sidecar container
+
+services:
+  postgres:
+    ports: []                                        # internal only
+    restart: always
+
+  redis:
+    ports: []
+    restart: always
+
+  api:
+    command: uvicorn services.api.main:app --host 0.0.0.0 --port 8000 --workers 2
+    volumes: []
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+
+  ingest:
+    volumes: []
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  signals:
+    volumes: []
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 768M
+
+  executor:
+    volumes: []
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  dashboard:
+    command: node server.js
+    restart: always
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: polybot-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # Domain + ACME email consumed by Caddyfile via {env.*} substitution
+      POLYBOT_DOMAIN:    ${POLYBOT_DOMAIN}
+      POLYBOT_TLS_EMAIL: ${POLYBOT_TLS_EMAIL}
+    volumes:
+      - ./infra/nginx/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api
+      - dashboard
+    restart: always
+
+  # ---- Backups -------------------------------------------------------------
+  # Tiny alpine sidecar that runs pg_dump once per day via cron. Backups are
+  # written to the host at ./var/backups/polybot/ via a bind mount. The script
+  # also prunes dumps older than 14 days.
+  backup:
+    image: alpine:3.20
+    container_name: polybot-backup
+    restart: always
+    depends_on:
+      - postgres
+    environment:
+      PGHOST:     postgres
+      PGPORT:     "5432"
+      PGUSER:     ${POSTGRES_USER:-polybot}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-polybot}
+      BACKUP_RETENTION_DAYS: "14"
+    volumes:
+      - ./scripts/backup.sh:/usr/local/bin/backup.sh:ro
+      - ./var/backups:/var/backups
+    # Install postgres client + tini, register a daily cron job, and start crond
+    # in the foreground. Cron runs at 03:17 UTC every day.
+    command: >
+      sh -c "
+        apk add --no-cache postgresql16-client tini bash gzip coreutils tzdata &&
+        mkdir -p /var/backups/polybot &&
+        echo '17 3 * * * /usr/local/bin/backup.sh >> /var/log/backup.log 2>&1' > /etc/crontabs/root &&
+        touch /var/log/backup.log &&
+        tini -- crond -f -L /var/log/backup.log
+      "
+
+volumes:
+  caddy-data:
+  caddy-config:

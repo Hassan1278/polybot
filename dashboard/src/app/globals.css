@@ -1,0 +1,18 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+
+html, body {
+  background: theme('colors.bg');
+  color: theme('colors.text');
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+.card {
+  @apply bg-panel rounded-lg p-4 border border-white/5;
+}
+
+.k { @apply text-muted text-xs uppercase tracking-wider; }
+.v { @apply text-text text-lg font-semibold tabular-nums; }

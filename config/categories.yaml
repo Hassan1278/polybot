@@ -1,0 +1,94 @@
+# Categories we track. A Polymarket "tag" is mapped to one of these buckets.
+# Wallet discovery + correlation are bucketed per category — a "sports sharp"
+# is not the same wallet population as a "crypto sharp".
+#
+# Adjust freely. Anything not listed falls into "other".
+#
+# ---------------------------------------------------------------------------
+# TUNING GUIDE
+# ---------------------------------------------------------------------------
+# few-signals-fire-more:
+#   - Lower `min_win_rate` (e.g. 0.55 -> 0.45) — admits more candidate wallets.
+#   - Raise `top_n` (e.g. 40 -> 80) — wider sharp-wallet pool per category.
+#   - Enable `sports_other` / `entertainment` / `other` to broaden coverage.
+#   - Add tags to a bucket if you see real markets being routed to `other`.
+#
+# too-many-signals-fire-fewer:
+#   - Raise `min_win_rate` (e.g. 0.55 -> 0.62) — tighter discovery filter.
+#   - Lower `top_n` (e.g. 50 -> 25) — only keep the very top wallets.
+#   - Disable a noisy category (set `enabled: false`).
+#
+# risk-management-tighter:
+#   - Disable `sports_other` and any low-conviction bucket.
+#   - Push `min_win_rate` to 0.60+ on every enabled category.
+#   - Keep `top_n` modest (20-30) so signal weight concentrates on proven sharps.
+# ---------------------------------------------------------------------------
+
+categories:
+  politics:
+    tags: [politics, us-politics, elections, geopolitics, trump, biden]
+    enabled: true
+    top_n: 50
+    min_win_rate: 0.55
+
+  # Major, liquid sports leagues — deep books, faster resolution, well-known sharps.
+  sports_major:
+    tags:
+      - nfl
+      - nba
+      - nhl
+      - mlb
+      - champions-league
+      - soccer-worldcup
+      - formula-1
+      - tennis-grandslam
+    enabled: true
+    top_n: 40
+    min_win_rate: 0.55
+
+  # Long-tail sports + esports — thinner books, noisier wallets, stricter floor.
+  # Disabled by default in gates.yaml; flip the gate allow-list to opt in.
+  sports_other:
+    tags:
+      - sports                        # generic sports tag (fallback bucket)
+      - cs2
+      - dota
+      - lol
+      - ufc
+      - tennis                        # non-grand-slam tennis
+      - soccer                        # non-worldcup / non-UCL soccer
+      - boxing
+      - golf
+      - cricket
+      - rugby
+    enabled: true
+    top_n: 20
+    min_win_rate: 0.60                # stricter — long-tail markets are noisier
+
+  crypto:
+    tags: [crypto, bitcoin, ethereum, defi, memecoins]
+    enabled: true
+    top_n: 30
+    min_win_rate: 0.55
+
+  macro:
+    tags: [economy, fed, inflation, cpi, gdp, recession]
+    enabled: true
+    top_n: 20
+    min_win_rate: 0.55
+
+  # Disabled by default — historical correlation between "sharps" here is weak
+  # and the books are thin enough that signals are mostly noise.
+  entertainment:
+    tags: [entertainment, oscars, emmys, music, gaming]
+    enabled: false
+    top_n: 20
+    min_win_rate: 0.55
+
+  # Catch-all bucket for unmapped tags. Disabled — if real markets land here,
+  # add their tag to an explicit bucket above instead of opening the floodgates.
+  other:
+    tags: []
+    enabled: false
+    top_n: 10
+    min_win_rate: 0.55

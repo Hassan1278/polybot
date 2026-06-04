@@ -1,0 +1,94 @@
+name: polybot
+
+x-python-base: &python-base
+  build:
+    context: .
+    dockerfile: services/_base/Dockerfile
+  env_file: .env
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis:    { condition: service_healthy }
+  restart: unless-stopped
+  volumes:
+    - ./services:/app/services
+    - ./packages:/app/packages
+    - ./scripts:/app/scripts
+    - ./config:/app/config
+    - ./data:/app/data
+    - ./alembic.ini:/app/alembic.ini:ro
+
+services:
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: polybot-postgres
+    env_file: .env
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB:       ${POSTGRES_DB}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: polybot-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  api:
+    <<: *python-base
+    container_name: polybot-api
+    command: uvicorn services.api.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+
+  ingest:
+    <<: *python-base
+    container_name: polybot-ingest
+    command: python -m services.ingest.main
+
+  signals:
+    <<: *python-base
+    container_name: polybot-signals
+    command: python -m services.signals.main
+
+  executor:
+    <<: *python-base
+    container_name: polybot-executor
+    command: python -m services.executor.main
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: polybot-dashboard
+    env_file: .env
+    environment:
+      NEXT_PUBLIC_API_URL: ${DASHBOARD_API_URL}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:

@@ -1,0 +1,72 @@
+# Risk-manager rules. The executor enforces these before EVERY order, in both
+# paper and live mode. Hot-reloaded every 30 s.
+#
+# ---------------------------------------------------------------------------
+# TUNING GUIDE
+# ---------------------------------------------------------------------------
+# few-signals-fire-more (executor is rejecting too aggressively):
+#   - Raise `execution.max_orders_per_minute` (6 -> 12).
+#   - Loosen `execution.reject_if_spread_pct_above` (5.0 -> 8.0).
+#   - Lower `execution.reject_if_top_wallet_count_below` (3 -> 1).
+#   - Raise `position.max_open_positions` so we don't queue/skip on busy bursts.
+#
+# too-many-signals-fire-fewer (executor is hammering the venue):
+#   - Lower `execution.max_orders_per_minute` (6 -> 3).
+#   - Tighten `execution.reject_if_spread_pct_above` (5.0 -> 2.5).
+#   - Raise `execution.cooldown_seconds_per_market` (300 -> 900).
+#
+# risk-management-tighter (protect capital first, fire second):
+#   - Shrink `position.max_position_usdc` (25 -> 10) and `max_per_market_usdc`.
+#   - Lower `drawdown.max_daily_loss_usdc` (50 -> 20) and keep `on_breach: kill`.
+#   - Tighten `execution.reject_if_spread_pct_above` (5.0 -> 2.0).
+#   - In `sizing`: drop `base_usdc` and `max_usdc`, push `anchor` (0.5 -> 0.65)
+#     and `steepness` (2.5 -> 4.0) so only high-score signals get real size.
+# ---------------------------------------------------------------------------
+
+global:
+  trading_hours_utc: "00:00-23:59"          # always-on by default
+  kill_on_db_lag_seconds: 60                # if ingest is more than 60 s behind, halt
+  kill_on_ws_disconnect_seconds: 120
+
+position:
+  # Testing cap. NOTE: in production this scales with PaperEquity — the runtime
+  # multiplies this by the equity-bucket factor, so leaving 25 here gives a
+  # conservative starting position while the equity curve is still small.
+  max_position_usdc: 25
+  max_open_positions: 5
+  max_per_market_usdc: 25
+  max_per_category_usdc: 75
+  size_sigmoid_anchor: 0.6                  # base sizing on signal score
+
+drawdown:
+  max_daily_loss_usdc: 50
+  max_weekly_loss_usdc: 150
+  daily_reset_utc_hour: 0
+  on_breach: kill                           # kill | pause_24h
+
+execution:
+  cooldown_seconds_per_market: 300
+  max_orders_per_minute: 6
+  reject_if_spread_pct_above: 5.0           # don't trade when book is wide
+  reject_if_top_wallet_count_below: 3
+
+# Used by the new `position_size_from_score(score)` helper. Output is a USDC
+# size clamped to [base_usdc, max_usdc], shaped by a sigmoid centred on
+# `anchor` with slope `steepness`:
+#
+#     size = base_usdc + (max_usdc - base_usdc) * sigmoid(steepness * (score - anchor))
+#
+# - base_usdc:   floor size for a barely-passing signal.
+# - max_usdc:    ceiling size for a near-perfect signal.
+# - anchor:      score at which we're at the midpoint between base and max.
+# - steepness:   how sharply size ramps around the anchor (higher = more bimodal).
+sizing:
+  base_usdc: 10
+  max_usdc: 50
+  anchor: 0.5
+  steepness: 2.5
+
+live_only:
+  require_kill_switch_check: true
+  require_admin_token_for_size_above_usdc: 100
+  enforce_allowance_check: true             # USDC.e approval to CTF must exist

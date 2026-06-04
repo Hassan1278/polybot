@@ -1,0 +1,63 @@
+# =============================================================================
+# Caddyfile — Polybot production reverse proxy
+# =============================================================================
+# Required environment variables (set on the host before `docker compose up`):
+#
+#   POLYBOT_DOMAIN      Base domain. Routes become:
+#                         api.${POLYBOT_DOMAIN}        -> api:8000
+#                         dashboard.${POLYBOT_DOMAIN}  -> dashboard:3000
+#                       e.g. POLYBOT_DOMAIN=polybot.example.com
+#
+#   POLYBOT_TLS_EMAIL   Contact email for Let's Encrypt ACME registration /
+#                       expiry notifications. e.g. ops@polybot.example.com
+#
+# Both subdomains are kept separate (rather than path-routed on one host) to
+# avoid CORS surprises with the FastAPI websocket endpoint.
+# =============================================================================
+
+{
+    # Explicit ACME issuer — Caddy auto-provisions TLS, but pinning the email
+    # ensures Let's Encrypt can notify us of renewal failures.
+    email {env.POLYBOT_TLS_EMAIL}
+}
+
+# ---- Shared snippets --------------------------------------------------------
+(security_headers) {
+    header {
+        # 1 year HSTS, include subdomains, eligible for browser preload list
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options    "nosniff"
+        Referrer-Policy           "strict-origin-when-cross-origin"
+        # Hide upstream server banner
+        -Server
+    }
+}
+
+(compression) {
+    encode gzip zstd
+}
+
+(json_log) {
+    log {
+        output stdout
+        format json
+    }
+}
+
+# ---- API --------------------------------------------------------------------
+api.{$POLYBOT_DOMAIN} {
+    import security_headers
+    import compression
+    import json_log
+
+    reverse_proxy api:8000
+}
+
+# ---- Dashboard --------------------------------------------------------------
+dashboard.{$POLYBOT_DOMAIN} {
+    import security_headers
+    import compression
+    import json_log
+
+    reverse_proxy dashboard:3000
+}

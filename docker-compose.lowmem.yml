@@ -1,0 +1,86 @@
+# Resource-light override for running on a laptop alongside other work.
+# Apply with:
+#   docker compose -f docker-compose.yml -f docker-compose.lowmem.yml up -d
+#
+# Hard ceilings sum to ~2.2 GB so even an 8 GB laptop keeps headroom for the
+# browser + IDE + Discord. Postgres and Redis get tuned config flags too so
+# they shrink their own caches.
+#
+# To monitor live: `docker stats --no-stream`
+# To revert: drop the second `-f` flag.
+
+name: polybot
+
+services:
+  postgres:
+    # shared_buffers down from default 128MB->96MB, effective cache 256MB,
+    # work_mem 4MB. With ~12k trades + ~5k markets this is plenty.
+    command: >
+      postgres
+        -c shared_buffers=96MB
+        -c effective_cache_size=256MB
+        -c work_mem=4MB
+        -c maintenance_work_mem=32MB
+        -c max_connections=50
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 192M
+
+  redis:
+    command: >
+      redis-server --appendonly yes
+        --maxmemory 64mb
+        --maxmemory-policy allkeys-lru
+        --save "" --io-threads 1
+    deploy:
+      resources:
+        limits:
+          memory: 96M
+        reservations:
+          memory: 32M
+
+  api:
+    # Disable --reload to avoid the watchfiles inotify overhead. The dev
+    # base image still uses uvicorn but without auto-reload.
+    command: uvicorn services.api.main:app --host 0.0.0.0 --port 8000 --workers 1
+    deploy:
+      resources:
+        limits:
+          memory: 320M
+        reservations:
+          memory: 96M
+
+  ingest:
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+        reservations:
+          memory: 128M
+
+  signals:
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+        reservations:
+          memory: 128M
+
+  executor:
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 96M
+
+  dashboard:
+    deploy:
+      resources:
+        limits:
+          memory: 320M
+        reservations:
+          memory: 96M
