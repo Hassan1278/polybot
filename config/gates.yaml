@@ -47,11 +47,12 @@ gates:
       # blackhole 987 already-categorised markets until the next market_ingest
       # pass re-tags them. Drop 'sports' once market_ingest has re-classified.
       #
-      # sports_other (tennis, eSports, MMA, lower-tier soccer etc.) is DROPPED
-      # in production: smart-money correlation on these markets is mostly
-      # noise — random co-trades on tennis matches don't represent edge.
-      # Re-add only after observing repeatable positive PnL in that bucket.
-      allow: [politics, sports, sports_major, crypto, macro]
+      # sports_other (tennis, eSports, MMA, lower-tier soccer) re-enabled
+      # for the OPS / infrastructure test phase: gives high signal volume
+      # so we can exercise the pipeline (fills, settlement, alerts) without
+      # waiting for politics/crypto news. Expect ~80% of fills here to be
+      # noise (coinflips × fees). Drop again before real money runs.
+      allow: [politics, sports, sports_major, sports_other, crypto, macro]
 
   # 2. Wallet quality — production floor. Sharps below 50% win-rate on a
   #    30d window are usually directionally random; we'd rather skip than fade.
