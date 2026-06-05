@@ -119,6 +119,22 @@ Wenn Bot Lynn Vision kauft, fragen wir aber yes_token_id → bekommen TYLOO-Mark
 
 ---
 
+## B12 — Equity-Formel double-deducted cost basis offener Positions (FIXED)
+
+**Symptom:** snapshot.equity ≈ $9,876 während die echte Equity (= starting + realized + unrealized) ≈ $10,258 ist. Konstanter Bias = sum of cost-basis-of-open-positions (~$350-400 für unsere ~60 offenen Trades).
+
+**Root cause:** `pnl_loop._equity_paper` nutzte:
+```python
+equity = starting - cash_used + realized + unrealized
+```
+Aber `cash_used` enthält BUY-notionals der noch offenen Positionen. Die Position-Market-Values (cost + unrealized) wurden NIE als positive Komponente eingerechnet → Cost-Basis wird effektiv doppelt abgezogen.
+
+**Beweis:** Start $100, BUY $30, mark steigt auf $0.40 (10$ MTM). Echte Equity = bank $70 + position-value $40 = $110. Alte Formel: $100 - $30 + $0 + $10 = $80 (off by $30 = cost). Korrekt: $100 + $0 + $10 = $110.
+
+**Fix:** `equity = starting + realized + unrealized` — `cash_used` ist redundant weil `realized` schon alle closed-position-PnL inkl. fees enthält und `unrealized` die MTM-Veränderung der offenen.
+
+---
+
 ## B11 — /midpoint returnt "no orderbook" für resolved Markets (FIXED)
 
 **War:** Für jedes resolved-but-pending Market gab /midpoint einen Fehler

@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
-from sqlalchemy import case, func, select
+from sqlalchemy import func, select
 
 from polybot import alerts
 from polybot.clients import ClobClient
@@ -19,7 +19,7 @@ from polybot.config import settings
 from polybot.db import session_scope
 from polybot.logging import get_logger
 from polybot.market_resolver import token_for_outcome
-from polybot.models import Fill, Market, PnLSnapshot, Position
+from polybot.models import Market, PnLSnapshot, Position
 from polybot.redis_bus import client as _redis_client
 from services.executor.paper import settle_resolved_markets
 
@@ -30,7 +30,35 @@ log = get_logger(__name__)
 
 
 async def _equity_paper() -> tuple[float, float, float, int]:
-    """Returns (equity, realized, unrealized, open_count) for paper mode."""
+    """Returns (equity, realized, unrealized, open_count) for paper mode.
+
+    Equity model:
+        equity = starting_cash + sum(realized) + sum(unrealized)
+
+    where:
+        realized   = sum(Position.realized_pnl_usdc) — already includes fees
+                     (subtracted per fill via realized_delta = -fee) and the
+                     PnL of fully-settled positions ((settle_px - avg) × size).
+        unrealized = sum((mark - avg) × size) for still-open positions —
+                     i.e. the mark-to-market GAIN on open positions, on top
+                     of their cost basis.
+
+    Previously the formula subtracted `cash_used` (the total BUY notional+fee
+    minus SELL proceeds) on top of realized+unrealized. That double-counts
+    the cost basis of open positions: bank cash is decreased by BUY cost,
+    but the position's current market value (cost + unrealized) is never
+    added back. With $346 of open cost basis the formula under-stated
+    equity by ~$346.
+
+    Verification on a toy case: starting=$100, BUY 100×$0.30 (cost=$30),
+    mark moves to $0.40 (unrealized=$10), no fees:
+        - bank cash:        $70
+        - position value:   $40  (= 100 × $0.40)
+        - true equity:      $110
+
+        OLD formula:        100 - 30 + 0 + 10 = $80   (off by $30 = cost)
+        NEW formula:        100 + 0 + 10 = $110       ✓
+    """
     async with session_scope() as s:
         rows = (await s.execute(
             select(Position.market_id, Position.outcome, Position.size_shares, Position.avg_price,
@@ -39,22 +67,6 @@ async def _equity_paper() -> tuple[float, float, float, int]:
             .join(Market, Market.market_id == Position.market_id)
             .where(Position.wallet == "PAPER")
         )).all()
-        # Net cash spent on positions (BUYs reduce bank, SELLs grow it).
-        # Use SQL CASE so the sign is evaluated per-row in the DB. The old
-        # version used a Python ternary on `Fill.side == "BUY"` (a SQLAlchemy
-        # Column expression) which evaluates `__bool__` once at query build
-        # time → always False → the sign collapsed to -1 for every row,
-        # systematically overstating paper equity by 2× the BUY total.
-        cash_used = (await s.execute(
-            select(func.coalesce(
-                func.sum(case(
-                    (Fill.side == "BUY",  Fill.notional_usdc + Fill.fee_usdc),
-                    else_=(-Fill.notional_usdc + Fill.fee_usdc),
-                )),
-                0.0,
-            ))
-            .where(Fill.mode == "paper")
-        )).scalar_one()
 
     realized = sum(r[4] for r in rows)
     unrealized = 0.0
@@ -94,7 +106,8 @@ async def _equity_paper() -> tuple[float, float, float, int]:
         finally:
             await c.close()
 
-    equity = settings.paper_starting_usdc - cash_used + realized + unrealized
+    # See docstring above — cash_used was double-subtracting cost basis.
+    equity = settings.paper_starting_usdc + realized + unrealized
     return equity, realized, unrealized, open_n
 
 
