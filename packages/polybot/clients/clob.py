@@ -31,6 +31,41 @@ class ClobClient(HttpClient):
         d = await self.get("/price", params={"token_id": token_id, "side": side})
         return float(d["price"]) if d and "price" in d else 0.0
 
+    async def last_trade_price(self, token_id: str) -> float:
+        """Last printed trade price for the token. Survives orderbook-empty
+        states (e.g. resolved-but-pending markets where /midpoint returns
+        'no orderbook') — the last trade is usually the resolution-reveal
+        price 0.999 / 0.001 in those cases.
+
+        Returns 0.0 if no trade has ever printed.
+        """
+        try:
+            d = await self.get("/last-trade-price", params={"token_id": token_id})
+        except Exception:  # noqa: BLE001
+            return 0.0
+        if not d:
+            return 0.0
+        # CLOB returns {"price": "0.999", "side": "SELL"} or similar
+        raw = d.get("price") if isinstance(d, dict) else None
+        if raw is None:
+            return 0.0
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return 0.0
+
+    async def best_mark(self, token_id: str) -> float:
+        """Best available mark for a token: midpoint if there's an orderbook,
+        else last-trade-price. Returns 0.0 only if both are unavailable.
+
+        Use this for mark-to-market display — /midpoint alone returns 0 for
+        resolved markets, which is misleading.
+        """
+        mid = await self.midpoint(token_id)
+        if mid > 0:
+            return mid
+        return await self.last_trade_price(token_id)
+
     async def book(self, token_id: str) -> dict[str, Any]:
         return await self.get(f"/book", params={"token_id": token_id})
 

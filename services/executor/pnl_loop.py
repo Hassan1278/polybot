@@ -18,6 +18,7 @@ from polybot.clients import ClobClient
 from polybot.config import settings
 from polybot.db import session_scope
 from polybot.logging import get_logger
+from polybot.market_resolver import token_for_outcome
 from polybot.models import Fill, Market, PnLSnapshot, Position
 from polybot.redis_bus import client as _redis_client
 from services.executor.paper import settle_resolved_markets
@@ -33,7 +34,8 @@ async def _equity_paper() -> tuple[float, float, float, int]:
     async with session_scope() as s:
         rows = (await s.execute(
             select(Position.market_id, Position.outcome, Position.size_shares, Position.avg_price,
-                   Position.realized_pnl_usdc, Market.yes_token_id, Market.no_token_id)
+                   Position.realized_pnl_usdc, Market.yes_token_id, Market.no_token_id,
+                   Market.outcomes)
             .join(Market, Market.market_id == Position.market_id)
             .where(Position.wallet == "PAPER")
         )).all()
@@ -60,35 +62,30 @@ async def _equity_paper() -> tuple[float, float, float, int]:
     if rows:
         c = ClobClient()
         try:
-            for mid, oc, sz, avg, _, yt, nt in rows:
+            for mid, oc, sz, avg, _, yt, nt, outcomes in rows:
                 if abs(sz) < 1e-6:
                     continue
                 open_n += 1
-                # Token-id lookup must mirror /positions endpoint:
-                # - "YES" outcome → yes_token_id
-                # - "NO"  outcome → no_token_id
-                # - ANY OTHER outcome (sport team names, candidate names,
-                #   "Trump", "TYLOO", etc.) → yes_token_id, because that's
-                #   where Polymarket stores the "this outcome" token for
-                #   multi-outcome markets. Previously we fell through to
-                #   no_token_id which queried the OPPOSITE side's mark,
-                #   systematically under-counting unrealized PnL on every
-                #   non-binary market (i.e. all sport_other positions).
-                oc_upper = (oc or "").upper()
-                if oc_upper == "YES":
-                    tid = yt
-                elif oc_upper == "NO":
-                    tid = nt
-                else:
-                    tid = yt
+                # Centralised token-id lookup. See
+                # packages/polybot/market_resolver.py:token_for_outcome —
+                # correctly handles multi-outcome markets via outcomes[]
+                # mapping, falls back to yes_token_id for legacy rows.
+                # SimpleNamespace shim because tuple rows don't have attrs.
+                from types import SimpleNamespace
+                row_shim = SimpleNamespace(
+                    yes_token_id=yt, no_token_id=nt, outcomes=outcomes,
+                    market_id=mid,
+                )
+                tid = token_for_outcome(row_shim, oc)
                 if not tid:
                     continue
                 try:
-                    mark = await c.midpoint(str(tid))
-                    # midpoint() returns 0.0 when CLOB has no "mid" field
-                    # (resolved markets, expired books). Treat 0.0 as
-                    # "no data" rather than "free shares" — fall back to
-                    # avg so the contribution is 0 instead of -cost.
+                    # best_mark = midpoint, fallback to last-trade-price
+                    # for resolved-but-pending markets. Without the fallback,
+                    # ~half of our open positions show mark=0 (= treated as
+                    # avg → 0 unrealized contribution), making aggregate
+                    # unrealized PnL severely under-reported.
+                    mark = await c.best_mark(str(tid))
                     if mark <= 0:
                         mark = avg
                 except Exception:  # noqa: BLE001

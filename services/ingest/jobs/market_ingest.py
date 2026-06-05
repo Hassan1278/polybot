@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from polybot.clients import GammaClient
@@ -49,16 +50,26 @@ async def run_market_ingest() -> None:
                     tags = [str(t.get("slug", "")).lower() for t in raw_tags if t]
                     cat = _category_from_tags(tags, tag_map)
 
-                    # clobTokenIds comes back as a JSON-encoded string: '["yes_id", "no_id"]'
-                    raw_tokens = m.get("clobTokenIds")
-                    tokens: list[str] = []
-                    if isinstance(raw_tokens, str) and raw_tokens.startswith("["):
-                        try:
-                            tokens = [str(t) for t in json.loads(raw_tokens)]
-                        except json.JSONDecodeError:
-                            tokens = []
-                    elif isinstance(raw_tokens, list):
-                        tokens = [str(t) for t in raw_tokens]
+                    # Gamma returns clobTokenIds + outcomes as JSON-encoded
+                    # strings: clobTokenIds='["yes_id","no_id"]', outcomes='["Yes","No"]'
+                    # for binary; for sports ['"TYLOO","Lynn Vision"'] etc. The
+                    # two lists are positionally aligned: outcomes[i] is the
+                    # human label for clobTokenIds[i]. This alignment is what
+                    # `market_resolver.token_for_outcome()` relies on to map
+                    # arbitrary outcome strings to the correct CLOB token.
+                    def _parse_json_list(raw: object) -> list[str]:
+                        if isinstance(raw, list):
+                            return [str(x) for x in raw]
+                        if isinstance(raw, str) and raw.startswith("["):
+                            try:
+                                d = json.loads(raw)
+                                return [str(x) for x in d] if isinstance(d, list) else []
+                            except json.JSONDecodeError:
+                                return []
+                        return []
+
+                    tokens = _parse_json_list(m.get("clobTokenIds"))
+                    outcomes_list = _parse_json_list(m.get("outcomes"))
                     yes_tid = tokens[0] if len(tokens) > 0 else None
                     no_tid  = tokens[1] if len(tokens) > 1 else None
 
@@ -81,6 +92,7 @@ async def run_market_ingest() -> None:
                         volume_24h_usdc=float(m.get("volume24hr") or 0),
                         yes_token_id=yes_tid,
                         no_token_id=no_tid,
+                        outcomes=outcomes_list or None,
                         updated_at=datetime.now(tz=timezone.utc),
                     ).on_conflict_do_update(
                         index_elements=["market_id"],
@@ -89,6 +101,13 @@ async def run_market_ingest() -> None:
                               "category": pg_insert(Market).excluded.category,
                               "resolved": pg_insert(Market).excluded.resolved,
                               "outcome": pg_insert(Market).excluded.outcome,
+                              # Don't overwrite outcomes with NULL on update —
+                              # if a later ingest pass doesn't include them
+                              # (closed-market re-ingest etc.), keep the old.
+                              "outcomes": sa.func.coalesce(
+                                  pg_insert(Market).excluded.outcomes,
+                                  Market.outcomes,
+                              ),
                               "updated_at": pg_insert(Market).excluded.updated_at},
                     )
                     await s.execute(stmt)

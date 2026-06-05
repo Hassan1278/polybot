@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from polybot.clients import ClobClient
 from polybot.db import get_session
 from polybot.logging import get_logger
+from polybot.market_resolver import token_for_outcome
 from polybot.models import Market, Position
 
 log = get_logger(__name__)
@@ -29,21 +30,22 @@ router = APIRouter()
 
 
 async def _safe_midpoint(c: ClobClient, token_id: str | None) -> float | None:
-    """Best-effort midpoint with hard 2 s timeout per call.
+    """Best-effort mark with hard 3 s timeout per call.
 
-    Returns None for any failure: resolved markets, no-book responses
-    (CLOB sends `{"error": "..."}` with HTTP 200), timeouts. We avoid
-    propagating exceptions so one failed token doesn't tank the whole
-    response — the caller already wraps us in `gather(return_exceptions=True)`.
+    Uses ClobClient.best_mark which tries /midpoint first then falls back
+    to /last-trade-price. The fallback matters for resolved-but-pending
+    markets where the orderbook is gone but the last printed trade is the
+    resolution price (0.999 / 0.001) — without it our dashboard shows
+    None for half the open positions.
+
+    Returns None on total failure / no data so the caller can render "—".
     """
     if not token_id:
         return None
     try:
-        async with asyncio.timeout(2.0):
-            mid = await c.midpoint(token_id)
-        # `midpoint()` returns 0.0 when CLOB had no "mid" field (e.g. expired
-        # market). Treat 0.0 as "not available" rather than "free shares".
-        return mid if mid > 0 else None
+        async with asyncio.timeout(3.0):
+            mark = await c.best_mark(token_id)
+        return mark if mark > 0 else None
     except Exception:  # noqa: BLE001
         return None
 
@@ -72,6 +74,7 @@ async def list_positions(
             Market.end_date,
             Market.yes_token_id,
             Market.no_token_id,
+            Market.outcomes,
             Market.resolved,
         )
         .join(Market, Market.market_id == Position.market_id, isouter=True)
@@ -91,15 +94,13 @@ async def list_positions(
     c = ClobClient()
     try:
         async def _mark(row: Any) -> float | None:
-            outcome = (row.outcome or "").upper()
-            # YES outcome → yes_token_id, NO → no_token_id, anything else
-            # (multi-outcome markets like sport teams) tries yes_token_id
-            # because that's where Polymarket stores the "this outcome" token.
-            tok = (
-                row.yes_token_id if outcome == "YES"
-                else row.no_token_id if outcome == "NO"
-                else row.yes_token_id
-            )
+            # Centralised token-id lookup. Correctly handles:
+            #   - YES/NO binary markets
+            #   - Multi-outcome markets via markets.outcomes JSONB
+            # Falls back to yes_token_id (legacy behaviour) only when no
+            # outcomes column is set — old markets that pre-date migration
+            # 0003 may need a backfill (scripts/backfill_market_outcomes.py).
+            tok = token_for_outcome(row, row.outcome)
             return await _safe_midpoint(c, tok)
 
         try:

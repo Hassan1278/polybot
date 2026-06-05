@@ -4,6 +4,11 @@ When a trade or signal references a market we haven't bulk-ingested, we look
 it up on Gamma, classify it against our category config, and upsert it. After
 that the regular gate chain works.
 
+Also exposes `token_for_outcome(market, outcome_str)` — the SINGLE place in
+the codebase that maps a position's outcome string to the correct CLOB
+token_id. Previously this logic was duplicated (and wrong for non-YES/NO
+outcomes) in services/api/routes/positions.py and services/executor/pnl_loop.py.
+
 Cached in Redis for an hour to avoid hammering Gamma during clustering bursts.
 """
 
@@ -11,6 +16,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -26,6 +32,90 @@ log = get_logger(__name__)
 
 CACHE_KEY = "polybot:resolved_market:{mid}"
 CACHE_TTL = 3600  # 1 h
+
+
+def _parse_json_list(raw: Any) -> list[str]:
+    """Parse Gamma's '["a","b"]' string-or-list responses into a clean list."""
+    if isinstance(raw, list):
+        return [str(x) for x in raw]
+    if isinstance(raw, str) and raw.startswith("["):
+        try:
+            data = json.loads(raw)
+            return [str(x) for x in data] if isinstance(data, list) else []
+        except json.JSONDecodeError:
+            return []
+    return []
+
+
+def token_for_outcome(market: Any, outcome: str | None) -> str | None:
+    """Map (market, outcome_string) → the correct CLOB token_id.
+
+    This is the canonical mapping used everywhere we need to query a mark
+    price or settle a position. It handles three cases:
+
+    1. **Legacy YES/NO**: outcome="YES" → yes_token_id, "NO" → no_token_id.
+       Works for politics / crypto / macro markets.
+
+    2. **Multi-outcome via outcomes column**: outcome="TYLOO" in a market
+       with outcomes=["TYLOO", "Lynn Vision"] → idx=0 → yes_token_id.
+       outcome="Lynn Vision" → idx=1 → no_token_id. This is the *correct*
+       path for sport_other and any non-binary market.
+
+    3. **Fallback (no outcomes data)**: returns yes_token_id, which is
+       the legacy buggy behaviour, but is the best guess when outcomes
+       JSON is missing (e.g. row was inserted before migration 0003).
+       Logged at DEBUG so we can spot stale rows during ops.
+
+    `market` is duck-typed: any object with attributes `yes_token_id`,
+    `no_token_id`, `outcomes` works (DB model rows, dicts wrapped in
+    SimpleNamespace, etc.). `outcome` can be None → returns None.
+    """
+    if outcome is None:
+        return None
+    upper = outcome.strip().upper()
+    if not upper:
+        return None
+
+    yes_tid = getattr(market, "yes_token_id", None)
+    no_tid = getattr(market, "no_token_id", None)
+
+    if upper == "YES":
+        return yes_tid
+    if upper == "NO":
+        return no_tid
+
+    outcomes_raw = getattr(market, "outcomes", None)
+    outcomes: list[str] = []
+    if isinstance(outcomes_raw, list):
+        outcomes = [str(o) for o in outcomes_raw]
+    elif isinstance(outcomes_raw, str):
+        outcomes = _parse_json_list(outcomes_raw)
+
+    if outcomes:
+        upper_outcomes = [o.strip().upper() for o in outcomes]
+        try:
+            idx = upper_outcomes.index(upper)
+        except ValueError:
+            idx = -1
+        if idx == 0:
+            return yes_tid
+        if idx == 1:
+            return no_tid
+        # idx >= 2 (rare multi-candidate market) — we only persist 2 tokens,
+        # so we can't price these without extending the schema. Return None
+        # so callers can fall back to avg_price.
+        if idx >= 2:
+            return None
+
+    # No outcomes data + non-binary outcome → legacy fallback, log it so
+    # ops can see which markets are stale and re-ingest.
+    log.debug(
+        "token_for_outcome.fallback",
+        market_id=getattr(market, "market_id", "?"),
+        outcome=outcome,
+        reason="outcomes_missing",
+    )
+    return yes_tid
 
 
 def _category_from_tags(tags: list[str]) -> str | None:
@@ -76,15 +166,8 @@ async def ensure_market(market_id: str) -> Market | None:
     tags = [str(t.get("slug", "")).lower() for t in raw_tags if t]
     cat = _category_from_tags(tags)
 
-    raw_tokens = m.get("clobTokenIds")
-    tokens: list[str] = []
-    if isinstance(raw_tokens, str) and raw_tokens.startswith("["):
-        try:
-            tokens = [str(t) for t in json.loads(raw_tokens)]
-        except json.JSONDecodeError:
-            tokens = []
-    elif isinstance(raw_tokens, list):
-        tokens = [str(t) for t in raw_tokens]
+    tokens = _parse_json_list(m.get("clobTokenIds"))
+    outcomes_list = _parse_json_list(m.get("outcomes"))
 
     end_dt = None
     if m.get("endDate"):
@@ -106,6 +189,7 @@ async def ensure_market(market_id: str) -> Market | None:
             volume_24h_usdc=float(m.get("volume24hr") or 0),
             yes_token_id=tokens[0] if len(tokens) > 0 else None,
             no_token_id=tokens[1] if len(tokens) > 1 else None,
+            outcomes=outcomes_list or None,
             updated_at=datetime.now(tz=timezone.utc),
         ).on_conflict_do_nothing(index_elements=["market_id"]))
         out = (await s.execute(
