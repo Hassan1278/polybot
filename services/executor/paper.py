@@ -23,6 +23,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from polybot.clients import ClobClient
 from polybot.db import session_scope
 from polybot.logging import get_logger
+from polybot.market_resolver import token_for_outcome
 from polybot.models import Fill, Market, Position
 
 log = get_logger(__name__)
@@ -119,12 +120,24 @@ async def simulate_fill(*, signal_id: int, market_id: str, outcome: str,
     """
     side_u = side.upper()
     async with session_scope() as s:
-        row = (await s.execute(
-            select(Market.yes_token_id, Market.no_token_id).where(Market.market_id == market_id)
+        m = (await s.execute(
+            select(Market.yes_token_id, Market.no_token_id, Market.outcomes)
+            .where(Market.market_id == market_id)
         )).first()
-        if not row:
+        if not m:
             return await _record_reject(signal_id, market_id, outcome, side, "market_unknown")
-        token_id = row[0] if outcome.upper() == "YES" else row[1]
+        # CRITICAL: use centralised token_for_outcome to map outcome string
+        # to the correct CLOB token. The old `row[0] if outcome=="YES" else
+        # row[1]` pattern silently bought the OPPOSITE side for any non-binary
+        # market (e.g. signal said "TYLOO" → executor bought "Lynn Vision").
+        # See BUGS.md B14.
+        from types import SimpleNamespace
+        shim = SimpleNamespace(
+            yes_token_id=m[0], no_token_id=m[1], outcomes=m[2], market_id=market_id,
+        )
+        token_id = token_for_outcome(shim, outcome)
+        if not token_id:
+            return await _record_reject(signal_id, market_id, outcome, side, "no_token_id")
 
     c = ClobClient()
     try:
@@ -186,12 +199,19 @@ async def close_position(market_id: str, outcome: str, fraction: float = 1.0) ->
         if not pos or pos.size_shares <= 0:
             return await _record_reject(None, market_id, outcome, "SELL", "no_position")
         target_shares = pos.size_shares * fraction
-        row = (await s.execute(
-            select(Market.yes_token_id, Market.no_token_id).where(Market.market_id == market_id)
+        m = (await s.execute(
+            select(Market.yes_token_id, Market.no_token_id, Market.outcomes)
+            .where(Market.market_id == market_id)
         )).first()
-        if not row:
+        if not m:
             return await _record_reject(None, market_id, outcome, "SELL", "market_unknown")
-        token_id = row[0] if outcome.upper() == "YES" else row[1]
+        from types import SimpleNamespace
+        shim = SimpleNamespace(
+            yes_token_id=m[0], no_token_id=m[1], outcomes=m[2], market_id=market_id,
+        )
+        token_id = token_for_outcome(shim, outcome)
+        if not token_id:
+            return await _record_reject(None, market_id, outcome, "SELL", "no_token_id")
 
     c = ClobClient()
     try:

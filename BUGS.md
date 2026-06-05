@@ -119,6 +119,47 @@ Wenn Bot Lynn Vision kauft, fragen wir aber yes_token_id → bekommen TYLOO-Mark
 
 ---
 
+## B14 — Executor kauft FALSCHEN Token für alle non-YES/NO outcomes (CRITICAL, FIXED)
+
+**Severity:** Catastrophic — alle Sport-Trades waren auf der GEGENSEITE platziert.
+
+**Symptom (Beweis aus executor logs):**
+- Signal: "BUY NIKOLAS SANCHEZ IZQUIERDO" auf Markt [Sanchez, Lautaro Midon]
+- Executor queried CLOB book für token_id=69344... (= Lautaro's no_token)
+- Recorded fill: outcome=NIKOLAS SANCHEZ IZQUIERDO, price=0.45, shares=8.83
+- **Reality:** wir halten Lautaro Tokens (Sanchez gewann → unsere Tokens jetzt wertlos)
+
+**Root cause:** 4 Stellen mit dem buggy Pattern:
+```python
+token_id = row[0] if outcome.upper() == "YES" else row[1]
+```
+- `services/executor/paper.py:127` (simulate_fill BUY)
+- `services/executor/paper.py:194` (close_position SELL)
+- `services/executor/live.py:144` (place_live)
+- `services/signals/conditions/liquidity.py:34` (liquidity gate)
+
+Für outcome="SANCHEZ" (non-YES/NO): `"SANCHEZ" != "YES"` → `row[1]` = no_token = Lautaro Token → wir kaufen die OPPOSITE side.
+
+**Impact auf historische Trades:**
+- Multi-outcome positions wo bot intended outcomes[0] (= erste Person/Team) → hat tatsächlich outcomes[1] gekauft
+- Multi-outcome positions wo bot intended outcomes[1] → zufällig korrekt (no_token matched intent)
+- Binary YES/NO: korrekt
+- Aggregierter Display-Fehler: **+$300 fake unrealized profit** (real: $35, displayed: $382)
+
+**Fix:**
+1. Alle 4 Sites auf `token_for_outcome()` Helper umgestellt
+2. One-shot `scripts/fix_b14_swap_outcomes.py`: swap outcome labels von outcomes[0] zu outcomes[1] für alle alten fills (sentinel idempotent)
+3. One-shot `scripts/fix_b14_normalise_case.py`: outcome casing auf UPPER normalisiert + paper positions rebuild aus fills um Duplikate zu mergen
+
+**Verifikation nach Fix:**
+- Positions reduziert 66 → 50 (Duplikate gemergt)
+- MTM korrigiert +$411 → +$70.80 (echter unrealised PnL)
+- Equity korrigiert $10,382 → $10,035.67 (= +$35 echter Profit)
+- Mary Stoiana (war FAKE +$56): jetzt korrekt -$8.95
+- Lautaro Midon (war versteckt unter SANCHEZ): jetzt sichtbar als -$21.43
+
+---
+
 ## B13 — Midpoint 404 + Retry-Sturm killt 60% der Mark-Lookups (FIXED)
 
 **Symptom:** 39 von 66 offenen Positionen zeigten `mark=null` auf dem

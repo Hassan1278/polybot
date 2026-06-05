@@ -135,13 +135,23 @@ async def place_live(*, signal_id: int, market_id: str, outcome: str,
                              reason=f"bad_order_kind:{order_kind}")
 
     async with session_scope() as s:
-        row = (await s.execute(
-            select(Market.yes_token_id, Market.no_token_id).where(Market.market_id == market_id)
+        m = (await s.execute(
+            select(Market.yes_token_id, Market.no_token_id, Market.outcomes)
+            .where(Market.market_id == market_id)
         )).first()
-        if not row:
+        if not m:
             return await _record(signal_id, market_id, outcome, side, "rejected",
                                  reason="market_unknown")
-        token_id = row[0] if outcome.upper() == "YES" else row[1]
+        # See BUGS.md B14 — non-binary outcomes (sport teams, candidates)
+        # MUST go through token_for_outcome or the executor bets the wrong
+        # side. The legacy `row[0] if outcome=="YES" else row[1]` pattern
+        # systematically inverted intent on non-binary markets.
+        from polybot.market_resolver import token_for_outcome
+        from types import SimpleNamespace
+        shim = SimpleNamespace(
+            yes_token_id=m[0], no_token_id=m[1], outcomes=m[2], market_id=market_id,
+        )
+        token_id = token_for_outcome(shim, outcome)
         if not token_id:
             return await _record(signal_id, market_id, outcome, side, "rejected",
                                  reason="token_id_missing")
