@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from sqlalchemy import select
 
 from polybot.clients import ClobClient
+from polybot.market_resolver import token_for_outcome
 from polybot.models import Market
 from services.signals.conditions.base import GateContext, GateResult
 
@@ -26,12 +29,20 @@ class Liquidity:
         side = ctx.candidate["side"].upper()
         target_usdc = float(ctx.extra.get("target_size_usdc", 25.0))
 
-        row = (await ctx.session.execute(
-            select(Market.yes_token_id, Market.no_token_id).where(Market.market_id == mid)
+        m = (await ctx.session.execute(
+            select(Market.yes_token_id, Market.no_token_id, Market.outcomes)
+            .where(Market.market_id == mid)
         )).first()
-        if not row:
+        if not m:
             return GateResult(self.name, self.type, False, "market_unknown")
-        token_id = row[0] if outcome == "YES" else row[1]
+        # See BUGS.md B14: token_for_outcome maps non-binary outcomes via
+        # outcomes[] index. Previously this gate checked the WRONG side's
+        # book depth and the executor then also bought the wrong side. Both
+        # have been routed through the helper for consistency.
+        shim = SimpleNamespace(
+            yes_token_id=m[0], no_token_id=m[1], outcomes=m[2], market_id=mid,
+        )
+        token_id = token_for_outcome(shim, outcome)
         if not token_id:
             return GateResult(self.name, self.type, False, "no_token_id")
 
