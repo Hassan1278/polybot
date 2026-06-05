@@ -64,11 +64,33 @@ async def _equity_paper() -> tuple[float, float, float, int]:
                 if abs(sz) < 1e-6:
                     continue
                 open_n += 1
-                tid = yt if oc.upper() == "YES" else nt
+                # Token-id lookup must mirror /positions endpoint:
+                # - "YES" outcome → yes_token_id
+                # - "NO"  outcome → no_token_id
+                # - ANY OTHER outcome (sport team names, candidate names,
+                #   "Trump", "TYLOO", etc.) → yes_token_id, because that's
+                #   where Polymarket stores the "this outcome" token for
+                #   multi-outcome markets. Previously we fell through to
+                #   no_token_id which queried the OPPOSITE side's mark,
+                #   systematically under-counting unrealized PnL on every
+                #   non-binary market (i.e. all sport_other positions).
+                oc_upper = (oc or "").upper()
+                if oc_upper == "YES":
+                    tid = yt
+                elif oc_upper == "NO":
+                    tid = nt
+                else:
+                    tid = yt
                 if not tid:
                     continue
                 try:
                     mark = await c.midpoint(str(tid))
+                    # midpoint() returns 0.0 when CLOB has no "mid" field
+                    # (resolved markets, expired books). Treat 0.0 as
+                    # "no data" rather than "free shares" — fall back to
+                    # avg so the contribution is 0 instead of -cost.
+                    if mark <= 0:
+                        mark = avg
                 except Exception:  # noqa: BLE001
                     mark = avg
                 unrealized += (mark - avg) * sz
