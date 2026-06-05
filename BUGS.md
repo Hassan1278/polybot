@@ -119,6 +119,33 @@ Wenn Bot Lynn Vision kauft, fragen wir aber yes_token_id → bekommen TYLOO-Mark
 
 ---
 
+## B13 — Midpoint 404 + Retry-Sturm killt 60% der Mark-Lookups (FIXED)
+
+**Symptom:** 39 von 66 offenen Positionen zeigten `mark=null` auf dem
+Dashboard, total MTM = $285 obwohl die echte Summe ~$411 ist.
+
+**Root cause (zwei verkettete Bugs):**
+
+a) `ClobClient.midpoint()` ließ HTTP-Exceptions durch → `best_mark()` kam nie
+   zum `/last-trade-price` Fallback. Für resolved-but-pending Markets returnt
+   /midpoint 404 ("No orderbook"), und der ganze Pfad bricht ab.
+
+b) `_http.py` retried 4× bei JEDEM HTTPError, inkl. 404 → 4 Calls × Backoff
+   ~0.5+1+2+4 s = ~10s pro Position bevor sie aufgibt. Bei `_safe_midpoint`'s
+   3-sek Timeout kam nichts mehr durch.
+
+**Fix:**
+- `midpoint()` + `price()` schlucken jede Exception → returnen 0.0.
+  `best_mark()` sieht dann die 0 und fällt sauber auf `last_trade_price`.
+- `_http._req` retried jetzt nur noch bei 5xx + 429 + Connection-Errors,
+  nicht mehr bei 4xx (die sind permanent).
+
+**Verifikation:** mark-Coverage von 27/66 (41%) → 52/66 (79%), MTM-Sum von
+$285 → $411 (Differenz = die resolved positions deren last-trade-price
+endlich abrufbar ist).
+
+---
+
 ## B12 — Equity-Formel double-deducted cost basis offener Positions (FIXED)
 
 **Symptom:** snapshot.equity ≈ $9,876 während die echte Equity (= starting + realized + unrealized) ≈ $10,258 ist. Konstanter Bias = sum of cost-basis-of-open-positions (~$350-400 für unsere ~60 offenen Trades).

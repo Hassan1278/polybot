@@ -24,11 +24,24 @@ class ClobClient(HttpClient):
     # ---- public read-only --------------------------------------------------
 
     async def midpoint(self, token_id: str) -> float:
-        d = await self.get("/midpoint", params={"token_id": token_id})
+        """Mid price for a token. Returns 0.0 if no orderbook (= 404 from CLOB).
+
+        We swallow the 404 internally so that `best_mark()` can fall through
+        to `/last-trade-price`. Previously the exception propagated all the
+        way up, retried 4× (wasted ~10 s per call), and broke the dashboard
+        mark display for any resolved-but-pending market.
+        """
+        try:
+            d = await self.get("/midpoint", params={"token_id": token_id})
+        except Exception:  # noqa: BLE001
+            return 0.0
         return float(d["mid"]) if d and "mid" in d else 0.0
 
     async def price(self, token_id: str, side: str) -> float:
-        d = await self.get("/price", params={"token_id": token_id, "side": side})
+        try:
+            d = await self.get("/price", params={"token_id": token_id, "side": side})
+        except Exception:  # noqa: BLE001
+            return 0.0
         return float(d["price"]) if d and "price" in d else 0.0
 
     async def last_trade_price(self, token_id: str) -> float:
