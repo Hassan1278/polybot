@@ -251,13 +251,26 @@ async def fill_alert(fill: dict) -> None:
     )
 
 
-async def risk_rejected_alert(reason: str) -> None:
-    """The risk engine rejected an order."""
+async def risk_rejected_alert(
+    reason: str,
+    *,
+    signal_id: int | str | None = None,
+) -> None:
+    """The risk engine rejected an order.
+
+    `signal_id` is optional context — the executor passes the signal id of the
+    rejected order so the alert is correlatable in the audit_log. Older callers
+    that didn't pass it still work.
+    """
+    tags = {"event": "risk_rejected"}
+    if signal_id is not None:
+        tags["signal_id"] = str(signal_id)
+    body = f"signal_id={signal_id} reason={reason}" if signal_id is not None else str(reason)
     await notify(
         "warn",
         "Risk rejected order",
-        str(reason),
-        tags={"event": "risk_rejected"},
+        body,
+        tags=tags,
     )
 
 
