@@ -80,10 +80,23 @@ class ClobClient(HttpClient):
         return await self.last_trade_price(token_id)
 
     async def book(self, token_id: str) -> dict[str, Any]:
-        return await self.get(f"/book", params={"token_id": token_id})
+        """Orderbook for a token. Returns empty dict if no orderbook exists
+        (e.g. resolved markets that CLOB has wiped). Without this swallow,
+        callers like the liquidity gate would crash with HTTPStatusError 404
+        instead of just rejecting the candidate cleanly. Cf. B13/B14.
+        """
+        try:
+            d = await self.get("/book", params={"token_id": token_id})
+        except Exception:  # noqa: BLE001
+            return {}
+        return d or {}
 
     async def books(self, token_ids: list[str]) -> list[dict[str, Any]]:
-        return await self.post("/books", json=[{"token_id": t} for t in token_ids])
+        try:
+            d = await self.post("/books", json=[{"token_id": t} for t in token_ids])
+        except Exception:  # noqa: BLE001
+            return []
+        return d or []
 
     async def price_history(self, market_slug: str, *, interval: str = "1h", fidelity: int = 60) -> list[dict[str, Any]]:
         return await self.get(
