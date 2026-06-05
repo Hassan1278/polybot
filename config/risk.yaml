@@ -29,13 +29,17 @@ global:
   kill_on_ws_disconnect_seconds: 120
 
 position:
-  # Testing cap. NOTE: in production this scales with PaperEquity — the runtime
-  # multiplies this by the equity-bucket factor, so leaving 25 here gives a
-  # conservative starting position while the equity curve is still small.
+  # max_position_usdc + max_per_market_usdc stay TIGHT so we don't concentrate.
+  # max_open_positions + max_per_category_usdc are RAISED so the bot keeps
+  # firing while equity is available — the previous 5-slot cap silently blocked
+  # dozens of valid signals (see audit_log:risk_rejected).
+  #
+  # With $10k equity × $25/trade × 50 open = ~$1250 max exposure (~12.5% of
+  # equity at risk). Comfortable diversification without equity-runout risk.
   max_position_usdc: 25
-  max_open_positions: 5
+  max_open_positions: 50
   max_per_market_usdc: 25
-  max_per_category_usdc: 75
+  max_per_category_usdc: 400
   size_sigmoid_anchor: 0.6                  # base sizing on signal score
 
 drawdown:
