@@ -1,12 +1,15 @@
 """Ingest service entrypoint.
 
-Schedules five loops concurrently:
+Schedules six loops concurrently:
   - market_ingest          : every 5 min, sync active markets + liquidity
   - leaderboard_scraper    : every 30 min, refresh top wallets per category
   - trade_ingest           : every 15 min, backfill recent trades for tracked wallets
   - attribution_heartbeat  : every 5 min, silent-failure detector — alerts if no
                              trades attribute to tracked wallets in the lookback
                              window (proxyWallet schema break canary)
+  - resolution_check       : every 10 min, flips markets.resolved=true for
+                             open paper positions past their end_date so the
+                             executor's settle loop can redeem them
   - live_listener          : continuous CLOB WS subscription
 """
 
@@ -20,6 +23,7 @@ from services.ingest.jobs.attribution_heartbeat import run_attribution_heartbeat
 from services.ingest.jobs.leaderboard_scraper import run_leaderboard
 from services.ingest.jobs.live_listener import run_live_listener
 from services.ingest.jobs.market_ingest import run_market_ingest
+from services.ingest.jobs.resolution_check import run_resolution_check
 from services.ingest.jobs.trade_ingest import run_trade_ingest
 
 log = get_logger(__name__)
@@ -53,6 +57,7 @@ async def main() -> None:
         asyncio.create_task(_every("leaderboard",           1800, run_leaderboard)),
         asyncio.create_task(_every("trade_ingest",          900,  run_trade_ingest)),
         asyncio.create_task(_every("attribution_heartbeat", 300,  run_attribution_heartbeat)),
+        asyncio.create_task(_every("resolution_check",      600,  run_resolution_check)),
         asyncio.create_task(run_live_listener()),
     ]
 

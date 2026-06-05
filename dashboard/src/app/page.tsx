@@ -3,6 +3,7 @@ import useSWR from "swr";
 import { fetcher, postAdmin } from "@/lib/api";
 import { ResponsiveLine } from "@nivo/line";
 import { useState } from "react";
+import type React from "react";
 
 type Pnl = { ts: string; equity: number; realized: number; unrealized: number; open: number };
 type Health = { ok: boolean; mode: string; can_sign: boolean; kill_switch: string | null };
@@ -75,6 +76,7 @@ export default function Home() {
                   <th className="text-right p-2">Cost</th>
                   <th className="text-right p-2">M-to-M</th>
                   <th className="text-right p-2">%</th>
+                  <th className="text-left p-2">Resolves</th>
                 </tr>
               </thead>
               <tbody>
@@ -95,6 +97,7 @@ export default function Home() {
                     <td className={`p-2 text-right ${pnlColor(p.pct_change)}`}>
                       {p.pct_change != null ? `${(p.pct_change * 100).toFixed(1)}%` : "—"}
                     </td>
+                    <td className="p-2 text-xs whitespace-nowrap">{resolveStatus(p)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -151,4 +154,36 @@ function pnlColor(n: number | null | undefined): string {
   if (n > 0) return "text-accent";
   if (n < 0) return "text-danger";
   return "";
+}
+
+function resolveStatus(p: Position): React.ReactNode {
+  if (p.resolved) {
+    return <span className="text-accent">resolved · auto-settle pending</span>;
+  }
+  if (!p.end_date) {
+    return <span className="text-muted">unknown</span>;
+  }
+  const ends = new Date(p.end_date);
+  const ms = ends.getTime() - Date.now();
+  if (ms <= 0) {
+    return (
+      <span className="text-danger" title={ends.toISOString()}>
+        past end-date — awaiting Polymarket UMA
+      </span>
+    );
+  }
+  const hours = ms / 3_600_000;
+  const days = ms / 86_400_000;
+  const label =
+    hours < 24
+      ? `${hours.toFixed(0)}h`
+      : days < 30
+        ? `${days.toFixed(0)}d`
+        : `${(days / 30).toFixed(1)}mo`;
+  const tone = hours < 48 ? "text-text" : "text-muted";
+  return (
+    <span className={tone} title={ends.toISOString()}>
+      in {label}
+    </span>
+  );
 }

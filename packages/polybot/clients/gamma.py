@@ -43,14 +43,24 @@ class GammaClient(HttpClient):
 
     async def market_by_condition_id(self, condition_id: str) -> dict[str, Any] | None:
         """Fetch a single market by its on-chain conditionId. Returns None if
-        not found. Used for just-in-time resolution when a trade points to a
-        market we haven't bulk-ingested yet."""
-        out = await self.get(
-            "/markets",
-            params={"condition_ids": condition_id, "include_tag": "true"},
-        )
-        if isinstance(out, list) and out:
-            return out[0]
+        not found.
+
+        Tries open-markets first (the common case for JIT resolution of new
+        signals). If that's empty, retries with ``closed=true`` so the
+        resolution-check job can find already-settled markets — Gamma's
+        default filter is ``closed=false`` and silently hides them otherwise.
+        """
+        for closed in (False, True):
+            out = await self.get(
+                "/markets",
+                params={
+                    "condition_ids": condition_id,
+                    "include_tag": "true",
+                    "closed": str(closed).lower(),
+                },
+            )
+            if isinstance(out, list) and out:
+                return out[0]
         return None
 
     async def events(self, *, limit: int = 100, offset: int = 0, active: bool = True) -> list[dict[str, Any]]:
