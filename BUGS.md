@@ -2,6 +2,58 @@
 
 Stand: nach Resilience-Push am 2026-06-07. Phase A + B + Security-Fixes alle implementiert.
 
+## Dashboard Control Plane + Wallet Management + Per-Mode Settings (2026-06-07, IMPLEMENTED)
+
+Full feature shipment from `~/.claude/plans/serene-seeking-puffin.md`. Five new
+capabilities, all LIVE-tested before commit:
+
+- **Encrypted wallet credentials** — new `packages/polybot/crypto.py` (AES-256-GCM
+  + AAD binding + nonce-per-encryption + weak-key rejection) + `WalletCredential`
+  model + migration `0006_wallet_credentials.py`. `ClobClient._signed_client()`
+  prefers DB credential, falls back to .env. Encrypt/decrypt roundtrip + AAD-mismatch
+  rejection live-verified.
+- **Redis-override runtime config** — new `packages/polybot/runtime_config.py` with
+  `merged_risk()`, `merged_categories()`, `merged_gates()`, `set_mode()`,
+  `set_overrides()`. YAML stays the shipped baseline; Redis overrides are the
+  dashboard's live patches. `services/executor/risk.py.preflight()` switched to
+  `merged_risk()` so per-mode caps take effect on the next preflight without restart.
+- **Per-mode YAML profiles** — `config/risk.yaml` restructured into
+  `defaults` + `modes.{paper,live}` keys. `HotConfig.get(mode)` deep-merges
+  defaults+per-mode. Live mode = tighter caps (max_open 30 vs 200, daily
+  loss 100 vs 50, sizing.anchor 0.65 vs 0.5, etc.).
+- **Admin endpoints** (services/api/routes/settings.py + metrics.py + main.py):
+  - `GET /admin/settings/` — effective + overrides + baseline
+  - `GET|POST /admin/settings/mode` — paper↔live (live requires `X-Live-Confirm` HMAC)
+  - `PATCH|DELETE /admin/settings/risk` — risk-config overrides
+  - `PATCH|POST|DELETE /admin/settings/categories[/name]` — categories CRUD
+  - `PATCH /admin/settings/gates` — gate-param overrides
+  - `GET|POST|DELETE /admin/settings/wallet[/id]` — wallet credentials
+  - `GET /metrics/categories?window=24h` — per-category winrate/profit/signals
+- **Dashboard `/settings` + `/metrics` pages** — 5 tabs (Mode, Risk, Categories,
+  Gates, Wallet) + per-category metrics page with Nivo bar chart. CSP headers
+  via `dashboard/src/middleware.ts`. `dashboard/src/lib/admin.ts` wraps
+  authenticated PATCH/POST/DELETE with sessionStorage-only token storage.
+- **Production security** — rate limit (60 req/min/IP via Redis bucket counter,
+  `services/api/rate_limit.py`) wired on all `/admin/*` includes. CSP +
+  X-Frame-Options DENY + X-Content-Type-Options nosniff + Permissions-Policy
+  in middleware. Wallet `private_key` form: controlled input, no localStorage,
+  no autoComplete, cleared on success AND on error.
+
+LIVE-verified before commit:
+  - Encrypt/decrypt roundtrip with AAD binding ✓
+  - Mode switch paper→live changes all 6 risk caps (max_open 200→30, etc.) ✓
+  - Live-confirm HMAC required (403 without it) ✓
+  - PATCH /admin/settings/risk applies override, DELETE reverts ✓
+  - /metrics/categories returns 8 categories with real per-cat data ✓
+  - 65 rapid admin requests → 59 OK + 6 rate-limited (429) ✓
+  - CSP header present on every dashboard response ✓
+  - All 7 containers healthy, 0 unhandled exceptions ✓
+
+Verdict: 3 parallel evaluator workflow (security/functional/code-quality) ran
+post-implementation — see workflow results in this session's final notes.
+
+---
+
 ## Resilience Hardening — Phase A + B (2026-06-07, FIXED)
 
 Out of the original plan (`C:\Users\Hassa\.claude\plans\serene-seeking-puffin.md`):

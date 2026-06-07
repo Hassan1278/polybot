@@ -47,6 +47,7 @@ RUN pip install --upgrade --root-user-action=ignore pip && \
       "pydantic>=2.9" "pydantic-settings>=2.5" \
       "celery[redis]>=5.4" "web3>=7.0" "eth-account>=0.13" \
       "structlog>=24.4" "sentry-sdk[fastapi]>=2.0" "pyyaml>=6.0" "click>=8.1" \
+      "cryptography>=43" "aiohttp>=3.10" \
       "py-clob-client-v2>=0.1.0" "polymarket-apis>=0.5.7"
 
 COPY packages /app/packages

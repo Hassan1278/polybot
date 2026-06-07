@@ -12,7 +12,7 @@ from polybot.logging import get_logger
 from polybot.models import Fill, Market, Position
 from polybot.redis_bus import client as redis_client  # noqa: F401  (re-exported for callers)
 from polybot.redis_bus import kill_status
-from polybot.yaml_config import risk_cfg
+from polybot.runtime_config import current_mode, merged_risk
 
 log = get_logger(__name__)
 
@@ -51,8 +51,24 @@ async def _spread_pct(token_id: str | None) -> float | None:
 
 async def preflight(*, mode: str, market_id: str, category: str | None,
                     side: str, size_usdc: float, score: float) -> dict:
-    """Returns {"ok": True, ...} or raises RiskRejection."""
-    cfg = risk_cfg.get()
+    """Returns {"ok": True, ...} or raises RiskRejection.
+
+    `mode` (paper|live) is the caller's declared mode (executor's
+    settings.trading_mode). We override with the runtime mode from
+    Redis so dashboard switches take effect on the very next preflight
+    — without restarting the executor. Risk config is also per-mode
+    merged so live mode's tighter caps apply when the runtime mode is
+    "live".
+    """
+    runtime_mode = await current_mode()
+    if runtime_mode != mode:
+        # Runtime override (dashboard flip) supersedes the boot-time mode.
+        # Important: the EXECUTION path still uses the caller's `mode` for
+        # things like Fill.mode = "paper" vs "live" — but the RISK CAPS
+        # come from the runtime mode so live-mode limits apply the moment
+        # the operator flips the switch.
+        mode = runtime_mode
+    cfg = await merged_risk(mode)
     pos_cfg = cfg.get("position", {})
     dd_cfg = cfg.get("drawdown", {})
     exec_cfg = cfg.get("execution", {})

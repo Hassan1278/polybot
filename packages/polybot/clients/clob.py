@@ -115,25 +115,92 @@ class ClobClient(HttpClient):
     def _signed_client(self):  # type: ignore[no-untyped-def]
         if self._signed is not None:
             return self._signed
-        if not settings.can_sign:
-            raise RuntimeError("can_sign=False — set POLYMARKET_PRIVATE_KEY + POLYMARKET_FUNDER_ADDRESS in .env")
 
         try:
             from py_clob_client_v2.client import ClobClient as _Sdk  # type: ignore
         except ImportError as exc:
             raise RuntimeError("py-clob-client-v2 not installed — run `pip install py-clob-client-v2`") from exc
 
+        # Prefer DB-stored wallet credential (encrypted, dashboard-managed).
+        # Fall back to .env-based key only if DB has no active credential —
+        # this keeps the legacy paper-test wiring alive while we migrate.
+        creds = self._load_active_wallet_credential()
+        if creds is not None:
+            key_b = creds["private_key"]
+            key = key_b.decode("utf-8") if isinstance(key_b, bytes) else key_b
+            funder = creds["funder_address"]
+            sig_type = creds["signature_type"]
+            log.info("clob_signed_client_using_db_credential",
+                     wallet_id=creds["id"], funder=funder)
+        elif settings.can_sign:
+            key = settings.polymarket_private_key.get_secret_value()
+            funder = settings.polymarket_funder_address
+            sig_type = settings.polymarket_signature_type
+            log.warning("clob_signed_client_using_env_fallback", funder=funder,
+                        msg="DB has no active wallet — using .env (deprecated)")
+        else:
+            raise RuntimeError(
+                "no signing credential available — add a wallet via "
+                "POST /admin/settings/wallet or set POLYMARKET_PRIVATE_KEY"
+            )
+
         c = _Sdk(
             host=settings.polymarket_clob_url,
-            key=settings.polymarket_private_key.get_secret_value(),
+            key=key,
             chain_id=settings.polygon_chain_id,
-            signature_type=settings.polymarket_signature_type,
-            funder=settings.polymarket_funder_address,
+            signature_type=sig_type,
+            funder=funder,
         )
         c.set_api_creds(c.create_or_derive_api_creds())
         self._signed = c
-        log.info("clob_signed_client_ready", funder=settings.polymarket_funder_address)
+        log.info("clob_signed_client_ready", funder=funder)
         return c
+
+    @staticmethod
+    def _load_active_wallet_credential() -> dict | None:
+        """Sync helper that loads + decrypts the active wallet from the
+        `wallet_credentials` table. Runs in a fresh sync connection (the
+        py-clob-client SDK is sync, so we're already on a worker thread
+        when this is called). Returns None if no active credential exists
+        or decryption fails — caller falls back to env.
+        """
+        try:
+            from datetime import datetime, timezone
+
+            from sqlalchemy import create_engine, select
+            from sqlalchemy.orm import sessionmaker
+
+            from polybot.crypto import decrypt
+            from polybot.models.wallet_credential import WalletCredential
+
+            # Convert async URL to sync (psycopg works for both)
+            sync_url = settings.database_url.replace("+psycopg", "+psycopg")
+            engine = create_engine(sync_url, pool_pre_ping=True)
+            session_local = sessionmaker(engine, expire_on_commit=False)
+            with session_local() as s:
+                row = s.execute(
+                    select(WalletCredential)
+                    .where(WalletCredential.is_active.is_(True))
+                    .order_by(WalletCredential.created_at.desc())
+                    .limit(1)
+                ).scalar_one_or_none()
+                if row is None:
+                    return None
+                aad = f"wallet:{row.address.lower()}:signing".encode()
+                key_bytes = decrypt(bytes(row.encrypted_private_key), aad=aad)
+                # touch last_used_at for ops visibility
+                row.last_used_at = datetime.now(tz=timezone.utc)
+                s.commit()
+                return {
+                    "id": row.id,
+                    "address": row.address,
+                    "funder_address": row.funder_address,
+                    "signature_type": row.signature_type,
+                    "private_key": key_bytes,
+                }
+        except Exception:  # noqa: BLE001
+            log.exception("clob_load_wallet_failed")
+            return None
 
     async def place_limit(
         self, *, token_id: str, side: str, price: float, size: float, order_type: str = "GTC"

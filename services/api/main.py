@@ -15,9 +15,11 @@ from services.api.routes import (
     fills,
     health,
     markets,
+    metrics,
     pipeline,
     pnl,
     positions,
+    settings as settings_routes,
     signals,
     wallets,
     ws,
@@ -57,7 +59,12 @@ app.include_router(signals.router, prefix="/signals",         tags=["signals"])
 app.include_router(fills.router,   prefix="/fills",           tags=["fills"])
 app.include_router(pnl.router,     prefix="/pnl",             tags=["pnl"])
 app.include_router(correlation.router, prefix="/correlation", tags=["correlation"])
-app.include_router(admin.router,   prefix="/admin",           tags=["admin"])
+from fastapi import Depends
+from services.api.rate_limit import admin_rate_limit
+_admin_rl = [Depends(admin_rate_limit())]
+app.include_router(admin.router,   prefix="/admin",           tags=["admin"], dependencies=_admin_rl)
+app.include_router(settings_routes.router, prefix="/admin/settings", tags=["admin", "settings"], dependencies=_admin_rl)
+app.include_router(metrics.router, prefix="/metrics",         tags=["metrics"])
 app.include_router(pipeline.router, prefix="/pipeline",       tags=["pipeline"])
 app.include_router(positions.router, prefix="/positions",     tags=["positions"])
 app.include_router(ws.router)                                 # /ws

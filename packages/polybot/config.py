@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     polymarket_private_key: SecretStr | None = None
     polymarket_funder_address: str | None = None
     polymarket_signature_type: int = 1  # 0=EOA  1=email/magic  2=browser
+    # AES-256-GCM master key for wallet_credentials table. Base64-encoded
+    # 32 raw bytes. Required in live mode; paper mode can run without it
+    # (uses polymarket_private_key env fallback when can_sign==True).
+    # Generate: python -c "from polybot.crypto import generate_master_key; print(generate_master_key())"
+    # Loss is unrecoverable — encrypted wallet rows become useless.
+    wallet_encryption_key: SecretStr | None = None
 
     # db / cache
     database_url: str

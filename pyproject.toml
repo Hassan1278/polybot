@@ -31,6 +31,8 @@ dependencies = [
   # blockchain
   "web3>=7.0",
   "eth-account>=0.13",
+  # crypto (AES-GCM for at-rest wallet credential encryption)
+  "cryptography>=43",
   # ops
   "structlog>=24.4",
   "sentry-sdk[fastapi]>=2.0",

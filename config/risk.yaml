@@ -1,83 +1,99 @@
-# Risk-manager rules. The executor enforces these before EVERY order, in both
-# paper and live mode. Hot-reloaded every 30 s.
+# Risk-manager rules. The executor enforces these before EVERY order.
+# Hot-reloaded every 30 s via packages/polybot/yaml_config.py.
+#
+# Layout:
+#   defaults:  shared across both modes (paper and live)
+#   modes.paper / modes.live:  per-mode overrides, deep-merged on top of defaults.
+#
+# Live-mode is intentionally TIGHTER than paper (smaller positions, tighter
+# drawdown, fewer concurrent slots) — paper-mode pushes for high concurrency
+# to exercise the pipeline; live mode protects real USDC.
+#
+# Dashboard mutations via /admin/risk write into Redis overrides (see
+# packages/polybot/runtime_config.py), keyed per mode. This file remains
+# the canonical baseline that `redis-cli FLUSHDB` reverts to.
 #
 # ---------------------------------------------------------------------------
 # TUNING GUIDE
 # ---------------------------------------------------------------------------
-# few-signals-fire-more (executor is rejecting too aggressively):
-#   - Raise `execution.max_orders_per_minute` (6 -> 12).
-#   - Loosen `execution.reject_if_spread_pct_above` (5.0 -> 8.0).
-#   - Lower `execution.reject_if_top_wallet_count_below` (3 -> 1).
-#   - Raise `position.max_open_positions` so we don't queue/skip on busy bursts.
+# few-signals-fire-more:
+#   - Raise execution.max_orders_per_minute (paper has it effectively-unlimited).
+#   - Loosen execution.reject_if_spread_pct_above (5.0 -> 8.0).
+#   - Lower execution.reject_if_top_wallet_count_below (3 -> 1).
+#   - Raise position.max_open_positions so the bot keeps firing.
 #
-# too-many-signals-fire-fewer (executor is hammering the venue):
-#   - Lower `execution.max_orders_per_minute` (6 -> 3).
-#   - Tighten `execution.reject_if_spread_pct_above` (5.0 -> 2.5).
-#   - Raise `execution.cooldown_seconds_per_market` (300 -> 900).
+# too-many-signals-fire-fewer:
+#   - Lower execution.max_orders_per_minute.
+#   - Tighten execution.reject_if_spread_pct_above.
+#   - Raise execution.cooldown_seconds_per_market.
 #
-# risk-management-tighter (protect capital first, fire second):
-#   - Shrink `position.max_position_usdc` (25 -> 10) and `max_per_market_usdc`.
-#   - Lower `drawdown.max_daily_loss_usdc` (50 -> 20) and keep `on_breach: kill`.
-#   - Tighten `execution.reject_if_spread_pct_above` (5.0 -> 2.0).
-#   - In `sizing`: drop `base_usdc` and `max_usdc`, push `anchor` (0.5 -> 0.65)
-#     and `steepness` (2.5 -> 4.0) so only high-score signals get real size.
+# risk-management-tighter (always start here for live):
+#   - Shrink position.max_position_usdc + max_per_market_usdc.
+#   - Lower drawdown.max_daily_loss_usdc; keep on_breach: kill.
+#   - In sizing: drop base_usdc + max_usdc, push anchor (0.5 -> 0.65),
+#     steepness (2.5 -> 4.0) so only high-score signals get real size.
 # ---------------------------------------------------------------------------
 
-global:
-  trading_hours_utc: "00:00-23:59"          # always-on by default
-  kill_on_db_lag_seconds: 60                # if ingest is more than 60 s behind, halt
-  kill_on_ws_disconnect_seconds: 120
+defaults:
+  global:
+    trading_hours_utc: "00:00-23:59"          # always-on by default
+    kill_on_db_lag_seconds: 60
+    kill_on_ws_disconnect_seconds: 120
 
-position:
-  # max_position_usdc + max_per_market_usdc stay TIGHT so we don't concentrate.
-  # max_open_positions + max_per_category_usdc are RAISED so the bot keeps
-  # firing while equity is available — the previous 5-slot cap silently blocked
-  # dozens of valid signals (see audit_log:risk_rejected).
-  #
-  # With $10k equity × $25/trade × 200 open = ~$5000 max exposure (~50% of
-  # equity at risk). Aggressive coverage so OPS test exercises the pipeline
-  # at high concurrency — drop back to 50 before any live-money run.
-  max_position_usdc: 25
-  max_open_positions: 200
-  max_per_market_usdc: 25
-  # 1000 USDC per category — paper-mode OPS phase, want full exposure
-  # across sports_other / crypto / politics / macro without bumping caps.
-  # Drop back to 250-400 before any live-money run.
-  max_per_category_usdc: 1000
-  size_sigmoid_anchor: 0.6                  # base sizing on signal score
+  position:
+    max_position_usdc: 25
+    max_open_positions: 50
+    max_per_market_usdc: 25
+    max_per_category_usdc: 400
+    size_sigmoid_anchor: 0.6
 
-drawdown:
-  max_daily_loss_usdc: 50
-  max_weekly_loss_usdc: 150
-  daily_reset_utc_hour: 0
-  on_breach: kill                           # kill | pause_24h
+  drawdown:
+    max_daily_loss_usdc: 50
+    max_weekly_loss_usdc: 150
+    daily_reset_utc_hour: 0
+    on_breach: kill                           # kill | pause_24h
 
-execution:
-  cooldown_seconds_per_market: 300
-  # Effectively-no rate-limit during OPS test phase. CLOB hard-caps around
-  # ~30/min per key so we'd never reach this; raise back to a sane value
-  # (e.g. 20) before live-money runs.
-  max_orders_per_minute: 10000
-  reject_if_spread_pct_above: 5.0           # don't trade when book is wide
-  reject_if_top_wallet_count_below: 3
+  execution:
+    cooldown_seconds_per_market: 300
+    max_orders_per_minute: 20
+    reject_if_spread_pct_above: 5.0
+    reject_if_top_wallet_count_below: 3
 
-# Used by the new `position_size_from_score(score)` helper. Output is a USDC
-# size clamped to [base_usdc, max_usdc], shaped by a sigmoid centred on
-# `anchor` with slope `steepness`:
-#
-#     size = base_usdc + (max_usdc - base_usdc) * sigmoid(steepness * (score - anchor))
-#
-# - base_usdc:   floor size for a barely-passing signal.
-# - max_usdc:    ceiling size for a near-perfect signal.
-# - anchor:      score at which we're at the midpoint between base and max.
-# - steepness:   how sharply size ramps around the anchor (higher = more bimodal).
-sizing:
-  base_usdc: 10
-  max_usdc: 50
-  anchor: 0.5
-  steepness: 2.5
+  # size = base_usdc + (max_usdc - base_usdc) * sigmoid(steepness * (score - anchor))
+  sizing:
+    base_usdc: 10
+    max_usdc: 50
+    anchor: 0.5
+    steepness: 2.5
 
-live_only:
-  require_kill_switch_check: true
-  require_admin_token_for_size_above_usdc: 100
-  enforce_allowance_check: true             # USDC.e approval to CTF must exist
+  live_only:
+    require_kill_switch_check: true
+    require_admin_token_for_size_above_usdc: 100
+    enforce_allowance_check: true             # USDC.e approval to CTF must exist
+
+modes:
+  paper:
+    # Paper mode: maximize coverage to exercise pipeline + collect signal data.
+    # Real-money safety isn't a concern, so caps go wide.
+    position:
+      max_open_positions: 200
+      max_per_category_usdc: 1000
+    execution:
+      max_orders_per_minute: 10000            # CLOB hard-caps anyway
+
+  live:
+    # Live mode: TIGHT caps. Real USDC. Default cap halves what paper allows.
+    position:
+      max_position_usdc: 25                   # same as default; ceiling stays small
+      max_open_positions: 30                  # well below paper's 200
+      max_per_category_usdc: 250              # max ~$5k exposure per category
+    drawdown:
+      max_daily_loss_usdc: 100                # kill at -1% of $10k equity
+    execution:
+      max_orders_per_minute: 20               # respectful of CLOB
+      reject_if_spread_pct_above: 3.0         # tighter slippage tolerance
+    sizing:
+      base_usdc: 5                            # smaller baseline bets
+      max_usdc: 25                            # ceiling = position cap
+      anchor: 0.65                            # only high-score signals get size
+      steepness: 4.0

@@ -16,6 +16,7 @@
     "@nivo/scatterplot": "0.87.0",
     "@nivo/heatmap": "0.87.0",
     "@nivo/line": "0.87.0",
+    "@nivo/bar": "0.87.0",
     "swr": "2.2.5",
     "clsx": "2.1.1"
   },

@@ -6,6 +6,7 @@ from polybot.models.position import Position
 from polybot.models.signal import Signal
 from polybot.models.trade import Trade
 from polybot.models.wallet import Wallet, WalletStats
+from polybot.models.wallet_credential import WalletCredential
 
 __all__ = [
     "Wallet",
@@ -17,4 +18,5 @@ __all__ = [
     "Fill",
     "PnLSnapshot",
     "AuditLog",
+    "WalletCredential",
 ]
