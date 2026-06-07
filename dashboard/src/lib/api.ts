@@ -1,4 +1,7 @@
-export const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// API base URL — default uses the same-origin Next.js rewrite (/api/* → api:8000)
+// which avoids CORS and uses a single port for browser↔server.
+// Set NEXT_PUBLIC_API_URL to override (e.g. point at a remote production API).
+export const API = process.env.NEXT_PUBLIC_API_URL || "/api";
 
 /**
  * SWR fetcher — surfaces real errors instead of swallowing them.
@@ -40,8 +43,20 @@ export async function postAdmin(path: string, token: string, body?: unknown): Pr
 }
 
 export function openWs(onMsg: (m: { channel: string; data: any }) => void): WebSocket {
-  const url = API.replace(/^http/, "ws") + "/ws";
-  const ws = new WebSocket(url);
+  // WS rewriting through Next.js is unreliable; always hit the api host
+  // directly. If API is "/api" (same-origin rewrite mode), build ws://host:8000.
+  let wsBase: string;
+  if (API.startsWith("/")) {
+    if (typeof window !== "undefined") {
+      const host = window.location.hostname;
+      wsBase = `ws://${host}:8000`;
+    } else {
+      wsBase = "ws://localhost:8000";
+    }
+  } else {
+    wsBase = API.replace(/^http/, "ws");
+  }
+  const ws = new WebSocket(wsBase + "/ws");
   ws.onmessage = (e) => {
     try { onMsg(JSON.parse(e.data)); } catch {}
   };

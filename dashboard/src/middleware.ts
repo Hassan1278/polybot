@@ -22,7 +22,11 @@ export function middleware(_request: NextRequest) {
 
   const csp = [
     "default-src 'self'",
-    `connect-src 'self' ${apiUrl} ${wsUrl}`,
+    // Allow same-origin (covers the new /api/* proxy mode) AND any
+    // configured external API URL (still works when NEXT_PUBLIC_API_URL
+    // is set to a remote host). WS always goes direct to the api host
+    // (Next rewrites don't reliably handle WebSocket).
+    `connect-src 'self' ${apiUrl} ${wsUrl} ws://localhost:8000 ws://127.0.0.1:8000`,
     "img-src 'self' data:",
     // 'unsafe-eval' removed (Triple-verify HIGH-3) — Next.js 14 prod build
     // doesn't need it; only dev mode does. 'unsafe-inline' stays for
