@@ -48,8 +48,17 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins or ["http://localhost:3000"],
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
-    allow_headers=["authorization", "content-type"],
+    # PATCH + DELETE needed for the settings UI (adminApi.patch/delete).
+    # OPTIONS auto-handled by Starlette; listing it is informational.
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    # Browser-side fetches send these headers:
+    #   X-Admin-Token: every admin mutation (kill-switch, settings, wallet)
+    #   X-Live-Confirm: only the paper→live mode switch (extra HMAC)
+    # Plus the standard authorization + content-type for completeness.
+    allow_headers=[
+        "authorization", "content-type",
+        "x-admin-token", "x-live-confirm",
+    ],
 )
 
 app.include_router(health.router)
