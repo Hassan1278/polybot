@@ -46,4 +46,16 @@ fi
 echo "[backup $(date -u +%FT%TZ)] pruning dumps older than ${RETENTION_DAYS} days"
 find "$BACKUP_DIR" -type f -name 'pg-*.sql.gz' -mtime "+${RETENTION_DAYS}" -print -delete || true
 
+# Optional off-host backup. If GITHUB_BACKUP_TOKEN + GITHUB_BACKUP_REPO are set,
+# push today's dump to a private GitHub repo so a disk-failure on this host
+# doesn't take both the live DB and the backups with it. Skip silently if
+# unset to keep dev frictionless.
+if [[ -n "${GITHUB_BACKUP_TOKEN:-}" && -n "${GITHUB_BACKUP_REPO:-}" ]]; then
+    if command -v bash >/dev/null 2>&1 && [[ -x "$(dirname "$0")/push_backup_to_github.sh" ]]; then
+        echo "[backup $(date -u +%FT%TZ)] pushing $OUT to github.com/${GITHUB_BACKUP_REPO}"
+        "$(dirname "$0")/push_backup_to_github.sh" "$OUT" \
+          || echo "[backup $(date -u +%FT%TZ)] github push FAILED (non-fatal)" >&2
+    fi
+fi
+
 echo "[backup $(date -u +%FT%TZ)] done"

@@ -35,12 +35,19 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Polybot API", version="0.1.0", lifespan=lifespan)
+
+# CORS — restrict to known origins. Wildcard "*" combined with
+# allow_credentials=True is an OWASP-flagged pattern (CSRF + credential
+# theft) so we list explicit origins from `settings.cors_origins`
+# (env CORS_ORIGINS, comma-separated). Empty list = same-origin only,
+# which the dashboard supports via the rewrite in next.config.js.
+_cors_origins = [o.strip() for o in (settings.cors_origins or "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins or ["http://localhost:3000"],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["authorization", "content-type"],
 )
 
 app.include_router(health.router)

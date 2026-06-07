@@ -48,7 +48,10 @@ async def _recent_trades_df(minutes: int) -> pd.DataFrame:
     ])
 
 
-async def correlation_loop() -> None:
+async def correlation_loop(beacon=None) -> None:
+    # `beacon` is an optional polybot.health_server.HealthBeacon. When
+    # passed, the loop bumps it on every iteration so the /health endpoint
+    # can report liveness even when there are zero trades to process.
     # Time-decay / scoring knobs — read straight from env so we don't have to
     # bloat Settings for tuning experiments. Defaults match polybot.stats.
     half_life_seconds = _env_float("CORRELATION_HALF_LIFE_SECONDS", 300.0)
@@ -98,6 +101,8 @@ async def correlation_loop() -> None:
         if now - last < min_interval:
             await asyncio.sleep(min_interval - (now - last))
         last = asyncio.get_event_loop().time()
+        if beacon is not None:
+            beacon.heartbeat()
 
         df = await _recent_trades_df(settings.correlation_window_minutes)
         trade_count = 0 if df.empty else len(df)

@@ -1,7 +1,31 @@
 # Known Bugs & Improvements — Polybot
 
-Stand: nach Manual-Audit am 2026-06-05. Reine Bestandsaufnahme — Reihenfolge ist
-nach Priorität, alle bisher noch UNFIXED.
+Stand: nach Resilience-Push am 2026-06-07. Phase A + B + Security-Fixes alle implementiert.
+
+## Resilience Hardening — Phase A + B (2026-06-07, FIXED)
+
+Out of the original plan (`C:\Users\Hassa\.claude\plans\serene-seeking-puffin.md`):
+
+- **A1** DB retry + pool_recycle in `packages/polybot/db.py` — tenacity AsyncRetrying on OperationalError, 3 attempts, exponential backoff. pool_recycle=1800, pool_timeout=10. LIVE-tested: `docker compose restart postgres` mid-traffic → executor recovered in <5 s, no unhandled exceptions.
+- **A2** Fill UNIQUE constraint via `0004_fill_signal_unique.py` migration + executor dedup at top of `services/executor/main.py:handle()`. LIVE-tested: republishing signal_id 12713 → `executor_dedup_skip` fires, no duplicate row.
+- **A3** `/health/deep` endpoint in `services/api/routes/health.py` queries DB + Redis, returns 503 if either fails. Docker healthchecks tightened: postgres+redis do query/write probes (not just port), api uses `/health/deep`, ingest/signals/executor use new `/health` on port 8081.
+- **B1** Redis Streams + DLQ for `signal:new`. New `xpublish`/`xconsume`/`xack`/`xdlq`/`xautoclaim` in `packages/polybot/redis_bus.py`. Executor `signal_consumer` uses XREADGROUP with consumer group `executors`. On handle() exception: payload routed to `signal:new:dlq` + critical alert fired. Periodic `_autoclaim_loop` reclaims pending entries from crashed peer consumers every 60 s. LIVE-tested: test poison message correctly routed to DLQ with full error trace, alert sent.
+- **B2** `/health` endpoints on ingest, signals, executor via `packages/polybot/health_server.py` (aiohttp on port 8081). `HealthBeacon` pinged from each main loop iteration. Docker healthchecks call them. All 3 services show `(healthy)` in `docker ps`.
+- **B3** TimescaleDB hypertable for `trades` + 180-day retention policy via `0005_trades_retention.py`. Migration is online — converts the existing heap table with `migrate_data=>true`, adds composite PK (id, ts) so the partition column is in every unique constraint.
+- **B4** GitHub-repo backup option in `scripts/backup.sh` + new `scripts/push_backup_to_github.sh`. Daily pg_dump optionally pushed to a private GitHub repo (configured via `GITHUB_BACKUP_TOKEN` + `GITHUB_BACKUP_REPO` in .env), 7-dump rotation. Skips silently if vars unset.
+
+Plus new restoration tooling: `scripts/restore.sh` (manual, idempotent, prompts before destructive action).
+
+---
+
+## Production-Readiness Security Fixes (2026-06-07)
+
+Discovered during the same audit pass:
+
+- **B15** GET /admin/kill bypass: the GET handler lacked `Depends(require_admin)` while POST handlers had it. Anyone could read the kill-switch state. **Fixed**: added `dependencies=[Depends(require_admin)]` to the GET handler in `services/api/routes/admin.py:23`. Verified `curl http://localhost:8000/admin/kill` returns 401.
+- **B16** trade_ingest watermark race condition: `_set_watermark` was called AFTER `session_scope` committed. If commit failed (transient OperationalError now caught by A1 retry, or hard failure), the watermark was bumped anyway → silent data loss. **Fixed**: moved the watermark write INSIDE the session_scope so it's atomic with the DB commit (`services/ingest/jobs/trade_ingest.py`).
+- **CORS lockdown**: replaced `allow_origins=["*"]` + `allow_credentials=True` (OWASP CSRF) with an env-driven `CORS_ORIGINS` list (`services/api/main.py`). Default `http://localhost:3000`. Methods locked to GET/POST, headers to authorization+content-type.
+- **ADMIN_TOKEN documentation** + dev-default kept but better commented in `packages/polybot/config.py`. The .env.example already had the right wording.
 
 ---
 

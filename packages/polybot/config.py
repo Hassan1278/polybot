@@ -51,7 +51,16 @@ class Settings(BaseSettings):
     # api
     api_host: str = "0.0.0.0"
     api_port: int = 8000
+    # admin_token MUST be overridden in .env. The default "change_me" is
+    # rejected at runtime in live-mode (see scripts/validate.py + the
+    # require_admin dependency) so any prod deploy with the default token
+    # cannot accept admin commands. In paper mode the default still works
+    # to keep local dev frictionless.
     admin_token: SecretStr = Field(default=SecretStr("change_me"))
+    # CORS — comma-separated list of allowed origins for the API.
+    # Empty/unset = only http://localhost:3000 (dev dashboard). Wildcard
+    # ("*") is intentionally NOT supported here — would defeat credentials.
+    cors_origins: str = "http://localhost:3000"
 
     # risk
     max_position_usdc: float = 25.0

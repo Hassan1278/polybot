@@ -10,6 +10,12 @@ from polybot.db import Base
 
 class Fill(Base):
     __tablename__ = "fills"
+    # Partial UNIQUE index `uq_fills_signal_id` on `signal_id WHERE signal_id
+    # IS NOT NULL` is created in migration 0004 to enforce at-most-one-fill-
+    # per-signal. NULL signal_ids (SETTLE rows from pnl_loop) are exempt
+    # because they're not signal-driven. The executor also pre-checks for an
+    # existing fill in `services/executor/main.py:handle` so the database
+    # IntegrityError is a belt-and-braces safety net.
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     signal_id: Mapped[int | None] = mapped_column(ForeignKey("signals.id"), index=True)

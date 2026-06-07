@@ -34,12 +34,16 @@ position:
   # firing while equity is available — the previous 5-slot cap silently blocked
   # dozens of valid signals (see audit_log:risk_rejected).
   #
-  # With $10k equity × $25/trade × 50 open = ~$1250 max exposure (~12.5% of
-  # equity at risk). Comfortable diversification without equity-runout risk.
+  # With $10k equity × $25/trade × 200 open = ~$5000 max exposure (~50% of
+  # equity at risk). Aggressive coverage so OPS test exercises the pipeline
+  # at high concurrency — drop back to 50 before any live-money run.
   max_position_usdc: 25
-  max_open_positions: 50
+  max_open_positions: 200
   max_per_market_usdc: 25
-  max_per_category_usdc: 400
+  # 1000 USDC per category — paper-mode OPS phase, want full exposure
+  # across sports_other / crypto / politics / macro without bumping caps.
+  # Drop back to 250-400 before any live-money run.
+  max_per_category_usdc: 1000
   size_sigmoid_anchor: 0.6                  # base sizing on signal score
 
 drawdown:
@@ -50,11 +54,10 @@ drawdown:
 
 execution:
   cooldown_seconds_per_market: 300
-  # Raised from 6 → 20: a healthy 9-signal cluster burst was dropping 3
-  # orders to rate_limit. 20/min is still well below Polymarket's actual
-  # CLOB per-key cap (~30/min) and gives headroom for burst clusters
-  # without blocking legitimate signals.
-  max_orders_per_minute: 20
+  # Effectively-no rate-limit during OPS test phase. CLOB hard-caps around
+  # ~30/min per key so we'd never reach this; raise back to a sane value
+  # (e.g. 20) before live-money runs.
+  max_orders_per_minute: 10000
   reject_if_spread_pct_above: 5.0           # don't trade when book is wide
   reject_if_top_wallet_count_below: 3
 

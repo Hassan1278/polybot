@@ -88,9 +88,11 @@ async def _compute_for_addr(addr: str, *, data: DataClient | None = None) -> Non
             await data.close()
 
 
-async def stats_loop() -> None:
+async def stats_loop(beacon=None) -> None:
     while True:
         try:
+            if beacon is not None:
+                beacon.heartbeat(loop="stats")
             async with session_scope() as s:
                 addrs = [r[0] for r in (await s.execute(
                     select(Wallet.address).where(Wallet.is_active.is_(True))

@@ -32,7 +32,10 @@ services:
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      # Two-stage: socket up AND simple query executable. Plain pg_isready
+      # passes the moment Postgres binds the port, before any DB is ready
+      # for queries — that lets dependents start too early.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB} && psql -U ${POSTGRES_USER} -d ${POSTGRES_DB} -tAc 'SELECT 1' >/dev/null"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -47,7 +50,9 @@ services:
     ports:
       - "6379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # ping + a write that auto-expires — proves both read and write paths
+      # work, not just the socket.
+      test: ["CMD-SHELL", "redis-cli ping >/dev/null && redis-cli set _hc 1 EX 5 >/dev/null"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -59,21 +64,48 @@ services:
     command: uvicorn services.api.main:app --host 0.0.0.0 --port 8000 --reload
     ports:
       - "8000:8000"
+    healthcheck:
+      # /health/deep verifies DB + Redis reachability via the real session
+      # pool, not just process-alive. Returns 503 if either is broken so
+      # docker can flag the container `unhealthy`.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health/deep >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 
   ingest:
     <<: *python-base
     container_name: polybot-ingest
     command: python -m services.ingest.main
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   signals:
     <<: *python-base
     container_name: polybot-signals
     command: python -m services.signals.main
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   executor:
     <<: *python-base
     container_name: polybot-executor
     command: python -m services.executor.main
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   dashboard:
     build:

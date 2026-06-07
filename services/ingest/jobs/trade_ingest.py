@@ -125,8 +125,16 @@ async def _ingest_wallet(d: DataClient, addr: str, *, max_trades: int = 200) -> 
                 "size": size, "price": price, "ts": t_ts,
             })
 
-    if newest_seen > wm:
-        await _set_watermark(addr, newest_seen)
+        # B16: watermark update INSIDE the session_scope so it's atomic
+        # with the DB commit. If commit fails (transient OperationalError
+        # caught by db.py retry, or hard failure), watermark stays old and
+        # we'll re-attempt the same trade range next cycle — pg_insert's
+        # on_conflict_do_nothing on tx_hash handles the dedup at the row
+        # level. Previously the watermark was set AFTER the session closed,
+        # so a commit failure left us with un-ingested trades but a bumped
+        # watermark = silent data loss.
+        if newest_seen > wm:
+            await _set_watermark(addr, newest_seen)
     return n
 
 

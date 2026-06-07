@@ -120,7 +120,7 @@ async def process_candidate(cand: dict, *, target_size_usdc: float | None = None
         sid = sig.id
 
     if gate_pass_hard:
-        await publish("signal:new", {
+        signal_payload = {
             "id": sid,
             "market_id": cand["market_id"],
             "outcome": cand.get("outcome", "YES"),
@@ -129,9 +129,21 @@ async def process_candidate(cand: dict, *, target_size_usdc: float | None = None
             "avg_price": ctx.extra.get("expected_avg_price") or cand.get("avg_price", 0.0),
             "size_usdc": final_size,
             "score": score,
-        })
-        log.info("signal_fired", id=sid, market=cand["market_id"], side=cand["side"],
-                 score=score, size_usdc=final_size)
+        }
+        # B1: durable delivery via Redis Streams. xpublish guarantees that
+        # the signal survives a subscriber crash — the executor consumer
+        # group only ACKs after a Fill row is written (or DLQ on error).
+        # The legacy `publish("signal:new", ...)` pub/sub is kept for the
+        # dashboard SSE endpoint to live-stream signals without joining
+        # the consumer group.
+        from polybot.redis_bus import xpublish
+        stream_id = await xpublish("signal:new", signal_payload)
+        await publish("signal:new", signal_payload)
+        log.info(
+            "signal_fired",
+            id=sid, stream_id=stream_id, market=cand["market_id"],
+            side=cand["side"], score=score, size_usdc=final_size,
+        )
     else:
         log.info("signal_gated_out", market=cand["market_id"], side=cand["side"], gates=results)
     return {"id": sid, "pass": gate_pass_hard, "gates": results}

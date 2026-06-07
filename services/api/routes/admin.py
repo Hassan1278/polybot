@@ -20,7 +20,10 @@ async def unkill(by: str = "manual") -> dict:
     return {"killed": False, "by": by}
 
 
-@router.get("/kill")
+@router.get("/kill", dependencies=[Depends(require_admin)])
 async def kill_get() -> dict:
+    # B15: GET also requires admin — kill-switch status is operational info,
+    # not for public consumption (an attacker can correlate this with their
+    # own trading to time exploits). Mirrors the POST endpoints above.
     return {"active": (await kill_status()) is not None,
             "reason": await kill_status()}

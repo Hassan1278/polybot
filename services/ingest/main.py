@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import signal
 
+from polybot.health_server import HealthBeacon, run_health_server
 from polybot.logging import get_logger
 from services.ingest.jobs.attribution_heartbeat import run_attribution_heartbeat
 from services.ingest.jobs.leaderboard_scraper import run_leaderboard
@@ -28,11 +29,18 @@ from services.ingest.jobs.trade_ingest import run_trade_ingest
 
 log = get_logger(__name__)
 
+# Healthy if ANY of the 6 jobs has produced a heartbeat in the last 10 min.
+# market_ingest and attribution_heartbeat run every 5 min so this floor is
+# tight enough to catch a real stall but loose enough to ignore one missed
+# beat. live_listener heartbeats continuously while WS is connected.
+_BEACON = HealthBeacon(name="ingest", stale_after_seconds=600)
+
 
 async def _every(name: str, seconds: int, coro_factory):
     while True:
         try:
             await coro_factory()
+            _BEACON.heartbeat(last_job=name)
         except Exception:
             log.exception("ingest_job_failed", job=name)
         await asyncio.sleep(seconds)
@@ -59,6 +67,7 @@ async def main() -> None:
         asyncio.create_task(_every("attribution_heartbeat", 300,  run_attribution_heartbeat)),
         asyncio.create_task(_every("resolution_check",      600,  run_resolution_check)),
         asyncio.create_task(run_live_listener()),
+        asyncio.create_task(run_health_server(_BEACON, port=8081)),
     ]
 
     await stop.wait()
