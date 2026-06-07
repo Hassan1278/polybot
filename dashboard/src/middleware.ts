@@ -40,6 +40,16 @@ export function middleware(_request: NextRequest) {
   response.headers.set("X-Content-Type-Options", "nosniff");
   response.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
   response.headers.set("Permissions-Policy", "geolocation=(), camera=(), microphone=()");
+  // Next.js standalone defaults HTML responses to `Cache-Control:
+  // s-maxage=31536000, stale-while-revalidate` (1-YEAR cache!), which means
+  // a user who visited an old broken build keeps seeing it until the
+  // browser revalidates — for a YEAR. For a single-instance dashboard
+  // that's user-hostile, so override every HTML response to no-store.
+  // Static assets under /_next/static still have their hash-based long
+  // cache (immutable) because the middleware matcher skips them.
+  response.headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
+  // Prevent any browser/proxy ETag/stale-revalidate loop:
+  response.headers.set("Pragma", "no-cache");
   return response;
 }
 
