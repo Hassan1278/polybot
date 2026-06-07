@@ -1,9 +1,10 @@
 "use client";
 import useSWR from "swr";
-import { fetcher, postAdmin } from "@/lib/api";
+import { fetcher, postAdmin, API } from "@/lib/api";
 import { ResponsiveLine } from "@nivo/line";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type React from "react";
+import { ADMIN_TOKEN_KEY, getAdminToken, setAdminToken, clearAdminToken } from "@/lib/admin";
 
 type Pnl = { ts: string; equity: number; realized: number; unrealized: number; open: number };
 type Health = { ok: boolean; mode: string; can_sign: boolean; kill_switch: string | null };
@@ -26,15 +27,27 @@ type Position = {
 };
 
 export default function Home() {
-  const { data: hh } = useSWR<Health>("/health", fetcher, { refreshInterval: 5000 });
-  const { data: pnl } = useSWR<Pnl[]>("/pnl?mode=paper&limit=720", fetcher, { refreshInterval: 30000 });
-  const { data: positions } = useSWR<Position[]>("/positions", fetcher, { refreshInterval: 15000 });
+  const { data: hh, error: hErr } = useSWR<Health>("/health", fetcher, { refreshInterval: 5000 });
+  const { data: pnl, error: pErr } = useSWR<Pnl[]>("/pnl?mode=paper&limit=720", fetcher, { refreshInterval: 30000 });
+  const { data: positions, error: posErr } = useSWR<Position[]>("/positions", fetcher, { refreshInterval: 15000 });
+
+  // Admin token persists across pages via sessionStorage. We seed the input
+  // from sessionStorage on mount so the user doesn't have to re-enter it
+  // every time they navigate back here.
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  useEffect(() => {
+    const t = getAdminToken();
+    if (t) setToken(t);
+  }, []);
 
   const equityCurve = (pnl || []).map(p => ({ x: new Date(p.ts).getTime(), y: p.equity }));
   const last = pnl?.[pnl.length - 1];
   const open = positions ?? [];
+
+  const apiFailed = hErr || pErr || posErr;
+  const firstErr = String(hErr ?? pErr ?? posErr ?? "");
 
   return (
     <div className="space-y-6">
@@ -43,8 +56,22 @@ export default function Home() {
         <span className="k">{hh?.mode ?? "?"} mode</span>
         {hh?.kill_switch
           ? <span className="text-danger text-sm">KILLED: {hh.kill_switch}</span>
-          : <span className="text-accent text-sm">live</span>}
+          : <span className="text-accent text-sm">running</span>}
       </header>
+
+      {apiFailed && (
+        <section className="card border-danger" style={{ borderColor: "#ff5470" }}>
+          <h2 className="text-sm k text-danger mb-1">API unreachable</h2>
+          <p className="text-xs text-muted whitespace-pre-line">
+            {firstErr}
+            {"\n\nDashboard is loaded but cannot reach the API at "}
+            <code className="text-text">{API}</code>{". Common causes:"}
+            {"\n  • the api container is not running (check `docker compose ps`)"}
+            {"\n  • CORS blocks the call — hard-refresh this tab (Ctrl+Shift+R)"}
+            {"\n  • Docker Desktop port-forward broke — try `wsl --shutdown` then restart Docker"}
+          </p>
+        </section>
+      )}
 
       <section className="grid grid-cols-4 gap-4">
         <Stat k="Equity"     v={last ? `$${last.equity.toFixed(2)}` : "—"} />
@@ -61,7 +88,9 @@ export default function Home() {
           </span>
         </div>
         {open.length === 0 ? (
-          <div className="text-xs text-muted py-2">no open positions</div>
+          <div className="text-xs text-muted py-2">
+            {posErr ? `failed to load — ${String(posErr).slice(0, 120)}` : "no open positions"}
+          </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -109,37 +138,90 @@ export default function Home() {
       <section className="card">
         <h2 className="text-sm k mb-2">Equity curve — paper mode</h2>
         <div style={{ height: 320 }}>
-          <ResponsiveLine
-            data={[{ id: "equity", data: equityCurve }]}
-            margin={{ top: 8, right: 16, bottom: 32, left: 56 }}
-            xScale={{ type: "linear" }}
-            yScale={{ type: "linear", min: "auto", max: "auto" }}
-            curve="monotoneX"
-            enableArea
-            colors={["#22d39e"]}
-            theme={{ background: "transparent", text: { fill: "#7a7a85" }, grid: { line: { stroke: "#1c1c25" } } }}
-            axisBottom={{ format: (v) => new Date(v as number).toLocaleTimeString() }}
-            axisLeft={{ format: ".0f" }}
-            enablePoints={false}
-          />
+          {equityCurve.length === 0 ? (
+            <div className="text-xs text-muted">
+              {pErr ? `failed to load equity history — ${String(pErr).slice(0, 120)}` : "no snapshots yet"}
+            </div>
+          ) : (
+            <ResponsiveLine
+              data={[{ id: "equity", data: equityCurve }]}
+              margin={{ top: 8, right: 16, bottom: 32, left: 56 }}
+              xScale={{ type: "linear" }}
+              yScale={{ type: "linear", min: "auto", max: "auto" }}
+              curve="monotoneX"
+              enableArea
+              colors={["#22d39e"]}
+              theme={{ background: "transparent", text: { fill: "#7a7a85" }, grid: { line: { stroke: "#1c1c25" } } }}
+              axisBottom={{ format: (v) => new Date(v as number).toLocaleTimeString() }}
+              axisLeft={{ format: ".0f" }}
+              enablePoints={false}
+            />
+          )}
         </div>
       </section>
 
       <section className="card">
-        <h2 className="text-sm k mb-2">Kill switch</h2>
-        <div className="flex gap-2 items-center">
+        <h2 className="text-sm k mb-2">Admin token + Kill switch</h2>
+        <p className="text-xs text-muted mb-2">
+          The admin token unlocks <code>/settings</code> (Wallet, Risk, Categories, Mode) and the
+          KILL/Clear buttons below. It&apos;s stored in sessionStorage only — cleared when you close
+          the tab.
+        </p>
+        <div className="flex gap-2 items-center flex-wrap">
           <input type="password" placeholder="admin token" value={token}
                  onChange={e => setToken(e.target.value)}
                  className="bg-black/40 border border-white/10 rounded px-3 py-2 text-sm w-72"/>
-          <button disabled={busy || !token} className="bg-danger text-white px-3 py-2 rounded text-sm"
-            onClick={async () => { setBusy(true); try { await postAdmin("/admin/kill?reason=dashboard", token); } finally { setBusy(false); } }}>
+          <button
+            className="bg-accent text-black px-3 py-2 rounded text-sm disabled:opacity-40"
+            disabled={!token}
+            onClick={() => {
+              setAdminToken(token);
+              setMsg({ kind: "ok", text: `token saved (${token.length} chars) — /settings + /wallet tab will now load` });
+              setTimeout(() => setMsg(null), 4000);
+            }}
+          >Save token</button>
+          <button
+            className="text-xs text-muted underline"
+            onClick={() => { clearAdminToken(); setToken(""); setMsg({ kind: "ok", text: "token cleared" }); setTimeout(() => setMsg(null), 3000); }}
+          >clear</button>
+          <span className="text-xs text-muted ml-4">
+            current: {getAdminToken() ? `set (${getAdminToken()!.length} chars)` : "none"}
+          </span>
+        </div>
+
+        <div className="flex gap-2 items-center mt-4">
+          <span className="text-xs k">Kill switch:</span>
+          <button disabled={busy || !token} className="bg-danger text-white px-3 py-2 rounded text-sm disabled:opacity-40"
+            onClick={async () => {
+              setBusy(true); setMsg(null);
+              try {
+                await postAdmin("/admin/kill?reason=dashboard", token);
+                setMsg({ kind: "ok", text: "kill switch activated — no new trades will fill" });
+              } catch (e) {
+                setMsg({ kind: "err", text: String(e instanceof Error ? e.message : e) });
+              } finally { setBusy(false); }
+            }}>
             KILL
           </button>
-          <button disabled={busy || !token} className="bg-accent text-black px-3 py-2 rounded text-sm"
-            onClick={async () => { setBusy(true); try { await postAdmin("/admin/kill/clear?by=dashboard", token); } finally { setBusy(false); } }}>
+          <button disabled={busy || !token} className="bg-accent text-black px-3 py-2 rounded text-sm disabled:opacity-40"
+            onClick={async () => {
+              setBusy(true); setMsg(null);
+              try {
+                await postAdmin("/admin/kill/clear?by=dashboard", token);
+                setMsg({ kind: "ok", text: "kill switch cleared — trading resumed" });
+              } catch (e) {
+                setMsg({ kind: "err", text: String(e instanceof Error ? e.message : e) });
+              } finally { setBusy(false); }
+            }}>
             Clear
           </button>
         </div>
+
+        {msg && (
+          <div className={`mt-3 text-xs ${msg.kind === "ok" ? "text-accent" : "text-danger"}`}>
+            {msg.text}
+          </div>
+        )}
       </section>
     </div>
   );
