@@ -24,7 +24,10 @@ export function middleware(_request: NextRequest) {
     "default-src 'self'",
     `connect-src 'self' ${apiUrl} ${wsUrl}`,
     "img-src 'self' data:",
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+    // 'unsafe-eval' removed (Triple-verify HIGH-3) — Next.js 14 prod build
+    // doesn't need it; only dev mode does. 'unsafe-inline' stays for
+    // Tailwind + Next's hydration snippet (mitigated by React auto-escape).
+    "script-src 'self' 'unsafe-inline'",
     "style-src 'self' 'unsafe-inline'",
     "font-src 'self' data:",
     "frame-ancestors 'none'",

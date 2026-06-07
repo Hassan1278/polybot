@@ -161,7 +161,9 @@ async def merged_categories(mode: str | None = None) -> dict[str, Any]:
     preserved unless explicitly patched.
     """
     mode = mode or await current_mode()
-    base = (risk_cfg.get(mode=mode) if False else categories_cfg.get(mode=mode)).get("categories", {}) or {}
+    # Triple-verify HIGH-4: was `(risk_cfg.get() if False else categories_cfg.get())`
+    # — leftover debugging artifact. Replaced with the obvious direct call.
+    base = (categories_cfg.get(mode=mode) or {}).get("categories", {}) or {}
     overrides = await get_overrides("categories", mode)
     out: dict[str, Any] = {k: {**v} for k, v in base.items()}
     for name, patch in overrides.items():

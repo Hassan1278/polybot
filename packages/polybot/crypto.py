@@ -68,30 +68,46 @@ def _load_key() -> bytes:
     return decoded
 
 
-def encrypt(plaintext: bytes | str, *, aad: bytes | None = None) -> bytes:
+def encrypt(plaintext: bytes | str, *, aad: bytes) -> bytes:
     """Encrypt `plaintext` and return `nonce || ciphertext || tag` bytes.
 
-    `aad` (optional) binds the ciphertext to a context (e.g. wallet
-    address). Decrypt MUST pass the same `aad` or fails with InvalidTag.
+    `aad` is REQUIRED — every ciphertext MUST be bound to a context
+    (e.g. wallet address). Triple-verify HIGH-1: making AAD optional
+    created risk that a future developer would skip it and produce
+    ciphertexts that can be replayed across contexts. Hard-requiring it
+    in the signature makes "forgot the AAD" a compile-time error.
+
+    To intentionally produce a context-free ciphertext (don't), pass
+    `aad=b""` explicitly.
     """
+    if not isinstance(aad, (bytes, bytearray)):
+        raise RuntimeError("aad must be bytes — encrypt() rejects None to "
+                           "prevent context-free ciphertexts (Triple-verify HIGH-1)")
     if isinstance(plaintext, str):
         plaintext = plaintext.encode("utf-8")
     nonce = os.urandom(_NONCE_BYTES)
     aead = AESGCM(_load_key())
-    ct = aead.encrypt(nonce, plaintext, aad)
+    ct = aead.encrypt(nonce, plaintext, bytes(aad))
     return nonce + ct
 
 
-def decrypt(blob: bytes, *, aad: bytes | None = None) -> bytes:
+def decrypt(blob: bytes, *, aad: bytes) -> bytes:
     """Inverse of :func:`encrypt`. Raises RuntimeError on any tamper /
     wrong-AAD / wrong-key — callers should NOT distinguish the cause to
-    avoid leaking information via error messages."""
+    avoid leaking information via error messages.
+
+    `aad` is REQUIRED for symmetry with encrypt() — see the docstring
+    there for the rationale.
+    """
+    if not isinstance(aad, (bytes, bytearray)):
+        raise RuntimeError("aad must be bytes — decrypt() rejects None to "
+                           "prevent silent context-free decrypts (Triple-verify HIGH-1)")
     if not isinstance(blob, bytes) or len(blob) < _NONCE_BYTES + 16:
         raise RuntimeError("ciphertext blob too short or wrong type")
     nonce, ct = blob[:_NONCE_BYTES], blob[_NONCE_BYTES:]
     aead = AESGCM(_load_key())
     try:
-        return aead.decrypt(nonce, ct, aad)
+        return aead.decrypt(nonce, ct, bytes(aad))
     except InvalidTag as exc:
         raise RuntimeError("decryption failed (tag/AAD/key mismatch)") from exc
 

@@ -1,25 +1,32 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import os
 import time
-from collections import OrderedDict
 from typing import Final
 
 from fastapi import Header, HTTPException, status
 
 from polybot.config import settings
+from polybot.logging import get_logger
+from polybot.redis_bus import client as _redis_client
+
+log = get_logger(__name__)
 
 # Replay protection window: a hardened token's timestamp must be within
 # +/- TIMESTAMP_SKEW_SECONDS of the server's current time.
 TIMESTAMP_SKEW_SECONDS: Final[int] = 60
 
-# Bounded in-memory LRU cache of previously-seen hardened tokens. Dropping
-# entries on restart is acceptable because the timestamp window is small
-# (any token older than TIMESTAMP_SKEW_SECONDS is rejected anyway).
-_REPLAY_CACHE_MAX: Final[int] = 1000
-_seen_tokens: "OrderedDict[str, None]" = OrderedDict()
+# Triple-verify HIGH-2: the in-memory LRU replay cache was lost on every
+# API restart, letting an attacker re-replay the same token after a
+# restart inside the 60-second skew window. Moved to Redis with TTL =
+# 2 × TIMESTAMP_SKEW_SECONDS so seen tokens survive restarts; the TTL
+# is bounded so the key space stays small (≤ 1 token per second of
+# real admin traffic, times 120 s = ~120 keys at peak).
+_REPLAY_KEY_PREFIX: Final[str] = "polybot:admin_replay:"
+_REPLAY_TTL_S: Final[int] = TIMESTAMP_SKEW_SECONDS * 2
 
 
 def _legacy_auth_enabled() -> bool:
@@ -33,16 +40,60 @@ def _compute_signature(secret: str, ts: str) -> str:
     return hmac.new(secret.encode("utf-8"), ts.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def _remember_token(token: str) -> bool:
-    """Record a hardened token; return False if it was already seen (replay)."""
-    if token in _seen_tokens:
-        # Move to end so genuine recent reuse stays "hot" until eviction.
-        _seen_tokens.move_to_end(token)
+async def _remember_token_async(token: str) -> bool:
+    """Record a hardened token in Redis with TTL; return False if it
+    was already seen (replay).
+
+    Uses Redis SET NX EX so:
+      - First insert succeeds → returns True (token unseen).
+      - Repeat insert fails (NX) → returns False (replay).
+    On Redis failure we FAIL CLOSED (return False = treat as replay) so
+    a downed Redis can't be used to bypass replay protection. This is the
+    opposite of the rate-limit fail-open choice — for SECURITY decisions,
+    "service degraded → admin requests blocked" is the safer default.
+    """
+    key = _REPLAY_KEY_PREFIX + hashlib.sha256(token.encode("utf-8")).hexdigest()
+    try:
+        # set returns True if key was set (= new token), None/False if it
+        # already existed (= replay).
+        result = await _redis_client().set(key, "1", nx=True, ex=_REPLAY_TTL_S)
+        return bool(result)
+    except Exception:  # noqa: BLE001
+        log.exception("admin_replay_redis_failed_failing_closed")
         return False
-    _seen_tokens[token] = None
-    while len(_seen_tokens) > _REPLAY_CACHE_MAX:
-        _seen_tokens.popitem(last=False)
-    return True
+
+
+def _remember_token(token: str) -> bool:
+    """Sync wrapper for use inside _verify_hardened (which is called from
+    a sync FastAPI dependency). FastAPI runs sync deps in a threadpool
+    via anyio, so we can drive the Redis call via asyncio.run on a fresh
+    event loop without colliding with the request's own loop."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Already in an async context (rare for a sync dep, but
+            # possible if someone calls require_admin directly from
+            # async code): run a new coroutine via asyncio.run_coroutine_threadsafe
+            # would deadlock — fall back to a fresh loop in a new thread.
+            import threading
+            result_holder: list[bool] = [False]
+            err_holder: list[BaseException | None] = [None]
+
+            def _run() -> None:
+                try:
+                    result_holder[0] = asyncio.run(_remember_token_async(token))
+                except BaseException as e:  # noqa: BLE001
+                    err_holder[0] = e
+
+            t = threading.Thread(target=_run, daemon=True)
+            t.start()
+            t.join(timeout=5)
+            if err_holder[0] is not None:
+                raise err_holder[0]
+            return result_holder[0]
+    except RuntimeError:
+        pass
+    return asyncio.run(_remember_token_async(token))
 
 
 def _verify_hardened(token: str, secret: str) -> bool:

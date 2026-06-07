@@ -2,6 +2,39 @@
 
 Stand: nach Resilience-Push am 2026-06-07. Phase A + B + Security-Fixes alle implementiert.
 
+## Triple-Verify HIGH-severity findings (2026-06-07, ALL FIXED)
+
+Adversarial 3-evaluator workflow ran post-implementation and found 5 issues
+worth fixing immediately. All four HIGH-severity ones now closed:
+
+- **HIGH-1 — AAD optional in crypto API** (security agent). `encrypt()` and
+  `decrypt()` accepted `aad: bytes | None = None`, letting a future developer
+  produce ciphertexts not bound to any context. Fixed: both functions now
+  REQUIRE `aad: bytes` (positional default removed); passing None raises
+  RuntimeError with a clear explanation. Existing caller in
+  `services/api/routes/settings.py:286` already passed AAD, so the change
+  is backward-compatible.
+- **HIGH-2 — Replay cache in-memory only** (security agent). The hardened
+  HMAC token replay protection used an `OrderedDict` lost on every API
+  restart, meaning a leaked token could be replayed once per restart inside
+  the 60-second skew window. Fixed: moved to Redis with `SET NX EX 120`
+  (services/api/deps.py). FAILS CLOSED on Redis errors (returns False =
+  treat as replay) — the opposite of the rate-limit's fail-open choice,
+  because security decisions deserve "service degraded → block" not "allow".
+- **HIGH-3 — CSP includes 'unsafe-eval'** (security agent). Next.js dev mode
+  needs eval(); production prerender does not. Removed from CSP in
+  `dashboard/src/middleware.ts`. Dashboard rebuilt + verified.
+- **HIGH-4 — Dead `if False else` artifact** (code-quality agent). Leftover
+  debugging branch in `packages/polybot/runtime_config.py:164`. Replaced
+  with the direct call + a comment pointing back to this triple-verify
+  finding.
+
+Functional evaluator passed cleanly; remaining MEDIUMs (rate-limit fail-open,
+admin-token 401 UX, unit tests for crypto/runtime_config) are noted in
+`CHANGES.md` as deferred improvements.
+
+---
+
 ## Dashboard Control Plane + Wallet Management + Per-Mode Settings (2026-06-07, IMPLEMENTED)
 
 Full feature shipment from `~/.claude/plans/serene-seeking-puffin.md`. Five new
