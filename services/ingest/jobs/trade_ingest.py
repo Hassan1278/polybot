@@ -111,9 +111,19 @@ async def _ingest_wallet(d: DataClient, addr: str, *, max_trades: int = 200) -> 
                 source="data_api",
             )
             if tx:
-                # The partial unique index requires matching its WHERE clause.
+                # Migration 0005 (TimescaleDB hypertable) requires the
+                # partition column `ts` to be in every UNIQUE constraint.
+                # The old `(tx_hash)` index was replaced with a composite
+                # `(tx_hash, ts)`. The ON CONFLICT clause must reference
+                # ALL columns of the target index, otherwise Postgres
+                # raises "there is no unique or exclusion constraint
+                # matching the ON CONFLICT specification" — which then
+                # propagates through asyncio.gather, closes the shared
+                # DataClient in the finally block, and cascade-fails the
+                # remaining wallets with "client has been closed". That
+                # bug silently broke trade_ingest for 9+ days.
                 stmt = stmt.on_conflict_do_nothing(
-                    index_elements=["tx_hash"],
+                    index_elements=["tx_hash", "ts"],
                     index_where=text("tx_hash IS NOT NULL"),
                 )
             await s.execute(stmt)

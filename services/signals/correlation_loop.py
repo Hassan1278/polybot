@@ -17,8 +17,8 @@ from polybot.db import session_scope
 from polybot.logging import get_logger
 from polybot.models import Trade, Wallet
 from polybot.redis_bus import publish, subscribe
-from polybot.stats import cluster_active_wallets
 from services.signals.engine import process_candidate
+from services.signals.strategies import load_strategy
 
 log = get_logger(__name__)
 
@@ -75,16 +75,28 @@ async def correlation_loop(beacon=None) -> None:
         heartbeat_interval_s=heartbeat_interval_s,
     )
 
-    # Trigger a recompute on every "trade:new" message — but debounce: at most
-    # one pass per `min_interval` seconds; back off when the last pass found
-    # nothing.
+    # SOLID — strategy is injected (DI), not hardcoded. Default is
+    # smart_money_mirror; swap via SIGNAL_STRATEGY env var.
+    strategy = load_strategy()
+
+    # B17 fix — race in the previous Event pattern. `pending.set()` from
+    # the listener could occur between `pending.wait()` returning and
+    # `pending.clear()`, dropping that wake-up. Replaced with a
+    # Queue-based signal: every trade:new pushes a tick onto the queue,
+    # the loop drains the queue per iteration. No TOCTOU window.
     min_interval = debounce_busy_s
     last = 0.0
-    pending = asyncio.Event()
+    wake_q: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
 
     async def listener() -> None:
         async for _ in subscribe("trade:new"):
-            pending.set()
+            # Best-effort wake — if queue already has a pending tick the
+            # put_nowait raises QueueFull and we just drop this one (the
+            # next iteration will still process all fresh trades from DB).
+            try:
+                wake_q.put_nowait(None)
+            except asyncio.QueueFull:
+                pass
 
     asyncio.create_task(listener())
 
@@ -95,8 +107,7 @@ async def correlation_loop(beacon=None) -> None:
     hb_passes = 0
 
     while True:
-        await pending.wait()
-        pending.clear()
+        await wake_q.get()
         now = asyncio.get_event_loop().time()
         if now - last < min_interval:
             await asyncio.sleep(min_interval - (now - last))
@@ -109,16 +120,17 @@ async def correlation_loop(beacon=None) -> None:
         hb_trades_seen += trade_count
         hb_passes += 1
 
-        cands: list[dict] = []
-        if not df.empty:
-            cands = cluster_active_wallets(
-                df,
-                window_minutes=settings.correlation_window_minutes,
-                min_wallets=settings.correlation_min_wallets,
-                half_life_seconds=half_life_seconds,
-                k_wallets=k_wallets,
-                k_notional=k_notional,
-            )
+        cands_typed = await strategy.generate_candidates(
+            df,
+            window_minutes=settings.correlation_window_minutes,
+            min_wallets=settings.correlation_min_wallets,
+            half_life_seconds=half_life_seconds,
+            k_wallets=k_wallets,
+            k_notional=k_notional,
+        )
+        # Engine still consumes dicts; serialise once here so process_candidate
+        # and the candidate:new Redis publish see the same legacy shape.
+        cands: list[dict] = [c.to_dict() for c in cands_typed]
 
         n_cands = len(cands)
         hb_candidates_found += n_cands

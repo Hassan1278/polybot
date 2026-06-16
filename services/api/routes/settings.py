@@ -139,9 +139,73 @@ async def set_mode_endpoint(
         if not _hmac.compare_digest(parts[1], expected):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "bad live confirm hmac")
 
+        # Live-readiness pre-validations — fail FAST so the operator
+        # doesn't switch to live, watch nothing happen, then have to dig
+        # through executor logs to find out why orders aren't flowing.
+        # Each check raises with a precise remediation so the dashboard
+        # can surface "go fix X first" instead of just 4xx.
+        await _validate_live_ready()
+
     old = await current_mode()
     await set_mode(body.mode, actor=f"admin@{_client_ip(request)}")
     return {"mode": body.mode, "previous": old}
+
+
+async def _validate_live_ready() -> None:
+    """Block paper→live switch unless the bot is actually able to trade.
+
+    Three pre-checks:
+      1. Kill switch must NOT already be active (otherwise every order
+         would be rejected at preflight and the operator wouldn't know).
+      2. An active wallet credential must exist in `wallet_credentials`
+         OR a POLYMARKET_PRIVATE_KEY + funder address in .env (legacy
+         fallback). Without either, the executor silently no-ops every
+         signal.
+      3. Best-effort: surface a warning if WALLET_ENCRYPTION_KEY is
+         missing — credentials in DB couldn't be decrypted anyway.
+
+    USDC.e allowance is NOT pre-checked here (web3 round-trip is slow +
+    needs an RPC URL we don't depend on yet). The first order will still
+    fail cleanly with reason='allowance_missing' which surfaces the bad
+    state — documented in BUGS.md.
+    """
+    from polybot.config import settings as _settings
+    from polybot.db import session_scope
+    from polybot.models import WalletCredential
+    from polybot.redis_bus import kill_status
+    from sqlalchemy import func, select
+
+    # 1. Kill switch
+    ks = await kill_status()
+    if ks:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"kill_switch is active ({ks!r}) — clear it via POST /admin/kill/clear before switching to live",
+        )
+
+    # 2. Signing credential
+    async with session_scope() as s:
+        n_active = (await s.execute(
+            select(func.count(WalletCredential.id))
+            .where(WalletCredential.is_active.is_(True))
+        )).scalar_one()
+    has_env_fallback = bool(
+        _settings.polymarket_private_key and _settings.polymarket_funder_address
+    )
+    if n_active == 0 and not has_env_fallback:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "no active wallet credential — add one via POST /admin/settings/wallet, "
+            "or set POLYMARKET_PRIVATE_KEY + POLYMARKET_FUNDER_ADDRESS in .env",
+        )
+
+    # 3. WALLET_ENCRYPTION_KEY must be present if relying on DB creds
+    if n_active > 0 and _settings.wallet_encryption_key is None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "WALLET_ENCRYPTION_KEY env var is unset but DB has encrypted "
+            "wallets — they cannot be decrypted. Set the key in .env first.",
+        )
 
 
 # ---- Risk ----------------------------------------------------------------

@@ -86,7 +86,34 @@ async def handle(sig: dict) -> None:
         )
     else:
         if not settings.can_sign:
-            log.error("live_mode_no_creds")
+            # Audit-trail fix: previously this branch silently returned,
+            # leaving no Fill row and no alert — operator had to read
+            # executor logs to figure out why orders weren't flowing.
+            # Now record a rejected Fill so the dashboard shows it.
+            log.error("live_mode_no_creds", signal=sid)
+            from datetime import datetime, timezone
+
+            from polybot.models import Fill
+            async with session_scope() as s:
+                s.add(Fill(
+                    signal_id=sid,
+                    ts=datetime.now(tz=timezone.utc),
+                    mode="live",
+                    market_id=market_id,
+                    outcome=outcome,
+                    side=side,
+                    size_shares=0.0, price=0.0, notional_usdc=0.0, fee_usdc=0.0,
+                    status="rejected", error="live_mode_no_creds",
+                ))
+            try:
+                await alerts.notify(
+                    "critical",
+                    "Live signal dropped: no signing credential",
+                    f"signal_id={sid} market={market_id[:18]} — add a wallet "
+                    "via /admin/settings/wallet or set POLYMARKET_PRIVATE_KEY",
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("alerts_no_creds_failed")
             return
         result = await place_live(
             signal_id=sid, market_id=market_id, outcome=outcome,

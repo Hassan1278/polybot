@@ -35,6 +35,114 @@ admin-token 401 UX, unit tests for crypto/runtime_config) are noted in
 
 ---
 
+## Strategy Pluggability + Live Pre-Validation + Critical Ingest Fix (2026-06-16, FIXED)
+
+After 9 days of data gap and a "doesn't fully work" report, an audit
+workflow ran four parallel investigators (bug sweep, strategy abstraction,
+live readiness, strategy performance). Most user-visible issue had a
+single root cause; secondary findings improved live-readiness.
+
+### B26 — Trade ingest silent fail for 9+ days (CRITICAL, FIXED)
+
+**Symptom:** zero new trades since 2026-06-07 13:37 UTC. Bot was running
+healthy (containers up, resolutions flipping, pnl_loop ticking) but the
+correlation engine had nothing fresh to score, so no signals fired, no
+fills.
+
+**Root cause:** migration 0005_trades_retention.py (TimescaleDB hypertable
+conversion) replaced the unique index on `trades` from single-column
+`(tx_hash)` to composite `(tx_hash, ts)` — the partition column MUST
+participate in every unique constraint for hypertables. But
+`services/ingest/jobs/trade_ingest.py:113-118` still used:
+
+    stmt.on_conflict_do_nothing(index_elements=["tx_hash"], ...)
+
+which doesn't match the composite index. Postgres rejected the first
+INSERT per cycle with `InvalidColumnReference: there is no unique or
+exclusion constraint matching the ON CONFLICT specification`. That
+exception propagated through `asyncio.gather`, the outer try/finally
+closed the shared `DataClient`, and every concurrent wallet-fetch task
+then got "Cannot send a request, as the client has been closed" — a
+classic cascade failure masquerading as a network problem.
+
+**Fix:** `services/ingest/jobs/trade_ingest.py` — added `ts` to the
+on-conflict index_elements. Verified: 89 trades ingested within 5 min
+of restart, vs. 0 over the prior 9 days.
+
+### B17 — Race condition in correlation_loop wake signal (HIGH, FIXED)
+
+`pending.set()` from the listener could fire between `pending.wait()`
+returning and `pending.clear()` — the cleared flag swallowed a wake-up.
+On busy days that silently dropped signals.
+
+**Fix:** replaced `asyncio.Event` with a 1-slot `asyncio.Queue`. Queue
+operations are atomic; if the listener tries to enqueue while one's
+already queued, QueueFull is caught (the next iteration drains all
+fresh trades from the DB anyway, so no semantic loss).
+
+### Live-mode pre-validation (FIXED)
+
+Previously, switching paper→live required only the HMAC X-Live-Confirm
+token. After the switch, three things could silently break the bot:
+
+1. No active wallet credential in DB AND no .env fallback → executor
+   silent-no-op'd every signal (and didn't even record a rejected fill).
+2. Kill-switch was already active → every order rejected at preflight.
+3. WALLET_ENCRYPTION_KEY missing → encrypted DB rows undecryptable.
+
+**Fix:** `services/api/routes/settings.py:_validate_live_ready()` —
+checks all three at mode-switch time, returns HTTP 409 with precise
+remediation strings. Dashboard surfaces the message directly, no log
+spelunking required.
+
+### Silent live_mode_no_creds (FIXED)
+
+When the executor handled a signal in live mode with no signing
+credentials, it called `log.error` and silently returned — no Fill row,
+no alert. Now records a Fill with `status='rejected'`,
+`error='live_mode_no_creds'` AND fires a CRITICAL alert so the operator
+sees the issue immediately.
+
+### Strategy is now pluggable (SOLID applied)
+
+**Before:** the "smart-money mirror" was hardcoded across 6 files;
+`correlation_loop.py:114` called `cluster_active_wallets()` directly. To
+add a second strategy you'd have to fork the loop.
+
+**After:** new `services/signals/strategies/` package:
+
+- `base.py` — `SignalStrategy` Protocol + `Candidate` dataclass.
+  Single method: `async generate_candidates(df, **knobs) -> [Candidate]`.
+- `smart_money_mirror.py` — thin adapter around the existing
+  `cluster_active_wallets` (no fork — math stays where it was).
+- `whale_follower.py` — stub demo strategy (single-address tracker)
+  proving the abstraction holds.
+- `__init__.py` — `_REGISTRY` + `load_strategy()` selects via
+  `SIGNAL_STRATEGY` env var (default: smart_money_mirror). Add a new
+  entry to swap; no other code changes.
+
+`correlation_loop.py` now calls `await strategy.generate_candidates(...)`.
+Gates, engine, executor, persistence — all unchanged. To run the demo
+whale-follower in paper:
+
+    SIGNAL_STRATEGY=whale_follower WHALE_FOLLOWER_ADDRESS=0x... \
+        docker compose up signals
+
+### Strategy performance verdict (informational)
+
+Lifetime PnL: +$143.88 realized + $81.55 unrealized = +$225 on $10k
+starting (+2.25%). Win rate on 91 closed positions: **50.5%** —
+statistically indistinguishable from coinflip. Profit comes from
+favourable risk-reward (avg win $9.13 vs avg loss $6.12) not from edge.
+
+By category: **crypto** 86% WR (n=7, too small to call), **politics**
+50% WR carried by one outlier (+$95 from a single trade), **sports_other**
+48% WR with most volume — DRAGGING. Recommendation: disable sports_other
+via dashboard, run paper longer to grow crypto sample. NOT live-ready
+from a strategy-EV standpoint.
+
+---
+
 ## Dashboard Control Plane + Wallet Management + Per-Mode Settings (2026-06-07, IMPLEMENTED)
 
 Full feature shipment from `~/.claude/plans/serene-seeking-puffin.md`. Five new
