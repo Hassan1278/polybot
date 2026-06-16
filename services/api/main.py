@@ -11,6 +11,7 @@ from polybot.logging import get_logger
 
 from services.api.routes import (
     admin,
+    auth,
     correlation,
     fills,
     health,
@@ -58,10 +59,14 @@ app.add_middleware(
     allow_headers=[
         "authorization", "content-type",
         "x-admin-token", "x-live-confirm",
+        "x-session-token",  # SIWE session header
     ],
 )
 
 app.include_router(health.router)
+# /auth is NOT under /admin* — it's the front door, no auth required
+# on /nonce or /verify (those ARE the auth).
+app.include_router(auth.router, prefix="/auth", tags=["auth"])
 app.include_router(wallets.router, prefix="/wallets",         tags=["wallets"])
 app.include_router(markets.router, prefix="/markets",         tags=["markets"])
 app.include_router(signals.router, prefix="/signals",         tags=["signals"])

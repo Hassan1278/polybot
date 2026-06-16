@@ -28,10 +28,13 @@ export function middleware(_request: NextRequest) {
     // (Next rewrites don't reliably handle WebSocket).
     `connect-src 'self' ${apiUrl} ${wsUrl} ws://localhost:8000 ws://127.0.0.1:8000`,
     "img-src 'self' data:",
-    // 'unsafe-eval' removed (Triple-verify HIGH-3) — Next.js 14 prod build
-    // doesn't need it; only dev mode does. 'unsafe-inline' stays for
-    // Tailwind + Next's hydration snippet (mitigated by React auto-escape).
-    "script-src 'self' 'unsafe-inline'",
+    // 'unsafe-eval' added back ONLY for ethers.js — the wallet sign-in
+    // library uses dynamic code evaluation for BigInt math on browsers
+    // that lack native support. Without it, "Connect Wallet" fails with
+    // "Refused to evaluate a string as JavaScript". Constrained to
+    // first-party scripts only via 'self', so a same-origin XSS would
+    // still need to be the dashboard's own bundle.
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
     "style-src 'self' 'unsafe-inline'",
     "font-src 'self' data:",
     "frame-ancestors 'none'",

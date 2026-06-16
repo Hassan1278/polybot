@@ -130,7 +130,27 @@ def _verify_legacy(token: str, secret: str) -> bool:
     return hmac.compare_digest(token, secret)
 
 
-def require_admin(x_admin_token: str | None = Header(default=None)) -> None:
+async def require_admin(
+    x_admin_token: str | None = Header(default=None),
+    x_session_token: str | None = Header(default=None),
+) -> None:
+    """Authorise an admin request via EITHER:
+
+      - X-Admin-Token (legacy or hardened HMAC), or
+      - X-Session-Token (SIWE — see services/api/routes/auth.py).
+
+    Both are checked because Web3 wallet sign-in is the preferred UX
+    going forward, but the admin token stays for scripts (kill_switch.py
+    etc.) and as a break-glass when no wallet is set up yet.
+    """
+    # SIWE session path — preferred for browser users.
+    if x_session_token:
+        from services.api.routes.auth import session_is_valid
+        addr = await session_is_valid(x_session_token)
+        if addr is not None:
+            return  # authenticated as `addr`
+
+    # Legacy / scripted X-Admin-Token path.
     if x_admin_token is None:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "bad admin token")
 

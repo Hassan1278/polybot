@@ -5,6 +5,8 @@ import { ResponsiveLine } from "@nivo/line";
 import { useState, useEffect } from "react";
 import type React from "react";
 import { ADMIN_TOKEN_KEY, getAdminToken, setAdminToken, clearAdminToken } from "@/lib/admin";
+import { getSessionToken } from "@/lib/wallet";
+import ConnectWallet from "@/components/ConnectWallet";
 
 type Pnl = { ts: string; equity: number; realized: number; unrealized: number; open: number };
 type Health = { ok: boolean; mode: string; can_sign: boolean; kill_switch: string | null };
@@ -161,41 +163,59 @@ export default function Home() {
       </section>
 
       <section className="card">
-        <h2 className="text-sm k mb-2">Admin token + Kill switch</h2>
-        <p className="text-xs text-muted mb-2">
-          The admin token unlocks <code>/settings</code> (Wallet, Risk, Categories, Mode) and the
-          KILL/Clear buttons below. It&apos;s stored in sessionStorage only — cleared when you close
-          the tab.
+        <h2 className="text-sm k mb-2">Sign in</h2>
+        <p className="text-xs text-muted mb-3">
+          Connect your Ethereum wallet to unlock <code>/settings</code> (Wallet, Risk, Categories,
+          Mode) and the KILL/Clear buttons. Sign-in is gasless — just an ECDSA signature, no
+          on-chain tx. You stay signed in for 24 h or until you close the tab.
         </p>
-        <div className="flex gap-2 items-center flex-wrap">
-          <input type="password" placeholder="admin token" value={token}
-                 onChange={e => setToken(e.target.value)}
-                 className="bg-black/40 border border-white/10 rounded px-3 py-2 text-sm w-72"/>
-          <button
-            className="bg-accent text-black px-3 py-2 rounded text-sm disabled:opacity-40"
-            disabled={!token}
-            onClick={() => {
-              setAdminToken(token);
-              setMsg({ kind: "ok", text: `token saved (${token.length} chars) — /settings + /wallet tab will now load` });
-              setTimeout(() => setMsg(null), 4000);
-            }}
-          >Save token</button>
-          <button
-            className="text-xs text-muted underline"
-            onClick={() => { clearAdminToken(); setToken(""); setMsg({ kind: "ok", text: "token cleared" }); setTimeout(() => setMsg(null), 3000); }}
-          >clear</button>
-          <span className="text-xs text-muted ml-4">
-            current: {getAdminToken() ? `set (${getAdminToken()!.length} chars)` : "none"}
-          </span>
-        </div>
 
-        <div className="flex gap-2 items-center mt-4">
+        <ConnectWallet />
+
+        <details className="mt-4">
+          <summary className="text-xs text-muted cursor-pointer hover:text-text">
+            Or paste an admin token (legacy)
+          </summary>
+          <div className="mt-3 flex gap-2 items-center flex-wrap">
+            <input type="password" placeholder="admin token" value={token}
+                   onChange={e => setToken(e.target.value)}
+                   className="bg-black/40 border border-white/10 rounded px-3 py-2 text-sm w-72"/>
+            <button
+              className="bg-accent text-black px-3 py-2 rounded text-sm disabled:opacity-40"
+              disabled={!token}
+              onClick={() => {
+                setAdminToken(token);
+                setMsg({ kind: "ok", text: `token saved (${token.length} chars)` });
+                setTimeout(() => setMsg(null), 4000);
+              }}
+            >Save token</button>
+            <button
+              className="text-xs text-muted underline"
+              onClick={() => { clearAdminToken(); setToken(""); setMsg({ kind: "ok", text: "token cleared" }); setTimeout(() => setMsg(null), 3000); }}
+            >clear</button>
+            <span className="text-xs text-muted ml-2">
+              current: {getAdminToken() ? `set (${getAdminToken()!.length} chars)` : "none"}
+            </span>
+          </div>
+        </details>
+
+        <div className="flex gap-2 items-center mt-4 flex-wrap">
           <span className="text-xs k">Kill switch:</span>
-          <button disabled={busy || !token} className="bg-danger text-white px-3 py-2 rounded text-sm disabled:opacity-40"
+          <button disabled={busy || (!token && !getSessionToken())}
+            className="bg-danger text-white px-3 py-2 rounded text-sm disabled:opacity-40"
             onClick={async () => {
               setBusy(true); setMsg(null);
               try {
-                await postAdmin("/admin/kill?reason=dashboard", token);
+                const session = getSessionToken();
+                if (session) {
+                  const r = await fetch(`${API}/admin/kill?reason=dashboard`, {
+                    method: "POST",
+                    headers: { "X-Session-Token": session },
+                  });
+                  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+                } else {
+                  await postAdmin("/admin/kill?reason=dashboard", token);
+                }
                 setMsg({ kind: "ok", text: "kill switch activated — no new trades will fill" });
               } catch (e) {
                 setMsg({ kind: "err", text: String(e instanceof Error ? e.message : e) });
@@ -203,11 +223,21 @@ export default function Home() {
             }}>
             KILL
           </button>
-          <button disabled={busy || !token} className="bg-accent text-black px-3 py-2 rounded text-sm disabled:opacity-40"
+          <button disabled={busy || (!token && !getSessionToken())}
+            className="bg-accent text-black px-3 py-2 rounded text-sm disabled:opacity-40"
             onClick={async () => {
               setBusy(true); setMsg(null);
               try {
-                await postAdmin("/admin/kill/clear?by=dashboard", token);
+                const session = getSessionToken();
+                if (session) {
+                  const r = await fetch(`${API}/admin/kill/clear?by=dashboard`, {
+                    method: "POST",
+                    headers: { "X-Session-Token": session },
+                  });
+                  if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+                } else {
+                  await postAdmin("/admin/kill/clear?by=dashboard", token);
+                }
                 setMsg({ kind: "ok", text: "kill switch cleared — trading resumed" });
               } catch (e) {
                 setMsg({ kind: "err", text: String(e instanceof Error ? e.message : e) });

@@ -18,6 +18,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             <Link href="/signals"  className="text-muted hover:text-text">Signals</Link>
             <Link href="/trades"   className="text-muted hover:text-text">Trades</Link>
             <Link href="/fills"    className="text-muted hover:text-text">Fills</Link>
+            <Link href="/strategy" className="text-muted hover:text-text">Strategy</Link>
             <Link href="/pipeline" className="text-muted hover:text-text">Pipeline</Link>
             <Link href="/metrics"  className="text-muted hover:text-text">Metrics</Link>
             <Link href="/settings" className="text-muted hover:text-text">Settings</Link>

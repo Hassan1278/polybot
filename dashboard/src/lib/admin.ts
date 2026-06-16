@@ -40,19 +40,32 @@ async function adminFetch(
   path: string,
   init: RequestInit,
 ): Promise<unknown> {
+  // Prefer SIWE session, fall back to legacy admin token. The user may
+  // have either configured.
+  // Lazy import to avoid pulling ethers into pages that don't need it.
+  const { getSessionToken } = await import("./wallet");
+  const session = getSessionToken();
   const token = getAdminToken();
-  if (!token) throw new Error("admin token not set — paste it in the kill-switch widget first");
+  if (!session && !token) {
+    throw new Error("not signed in — click 'Connect Wallet' on the home page");
+  }
+  const authHeaders: Record<string, string> = {};
+  if (session) authHeaders["X-Session-Token"] = session;
+  if (token) authHeaders["X-Admin-Token"] = token;
   const r = await fetch(`${API}${path}`, {
     ...init,
     headers: {
       ...(init.headers || {}),
-      "X-Admin-Token": token,
+      ...authHeaders,
       "Content-Type": "application/json",
     },
   });
   if (r.status === 401) {
+    // Session expired or token rejected — clear and ask the user to re-auth.
     clearAdminToken();
-    throw new Error("admin token rejected — re-enter on home page");
+    const { clearSession } = await import("./wallet");
+    clearSession();
+    throw new Error("session expired — sign in again on the home page");
   }
   if (!r.ok) {
     const text = await r.text();

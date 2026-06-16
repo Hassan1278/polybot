@@ -18,7 +18,8 @@
     "@nivo/line": "0.87.0",
     "@nivo/bar": "0.87.0",
     "swr": "2.2.5",
-    "clsx": "2.1.1"
+    "clsx": "2.1.1",
+    "ethers": "6.13.4"
   },
   "devDependencies": {
     "@types/node": "20.16.5",
