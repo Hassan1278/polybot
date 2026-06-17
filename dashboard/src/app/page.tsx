@@ -33,7 +33,14 @@ type Position = {
 export default function Home() {
   const { data: hh, error: hErr } = useSWR<Health>("/health", fetcher, { refreshInterval: 5000 });
   const { data: pnl, error: pErr } = useSWR<Pnl[]>("/pnl?mode=paper&limit=720", fetcher, { refreshInterval: 30000 });
-  const { data: positions, error: posErr, mutate: mutatePositions } = useSWR<Position[]>("/positions", fetcher, { refreshInterval: 15000 });
+  // /positions requires admin now (audit hardening — was an info leak).
+  // Use adminApi when signed in; gate on authed so the SWR doesn't fire
+  // a 401-storm before login completes.
+  const { data: positions, error: posErr, mutate: mutatePositions } = useSWR<Position[]>(
+    authed ? "/positions" : null,
+    (p: string) => adminApi.get(p) as Promise<Position[]>,
+    { refreshInterval: 15000 },
+  );
 
   // Admin token persists across pages via sessionStorage. We seed the input
   // from sessionStorage on mount so the user doesn't have to re-enter it
@@ -103,7 +110,11 @@ export default function Home() {
         </div>
         {open.length === 0 ? (
           <div className="text-xs text-muted py-2">
-            {posErr ? `failed to load — ${String(posErr).slice(0, 120)}` : "no open positions"}
+            {!authed
+              ? "Sign in (Connect Wallet, header) to view open positions."
+              : posErr
+                ? `failed to load — ${String(posErr).slice(0, 120)}`
+                : "no open positions"}
           </div>
         ) : (
           <div className="overflow-x-auto">
