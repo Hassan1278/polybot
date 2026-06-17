@@ -12,6 +12,23 @@ import ConfirmModal from "@/components/ConfirmModal";
 
 type Pnl = { ts: string; equity: number; realized: number; unrealized: number; open: number };
 type Health = { ok: boolean; mode: string; can_sign: boolean; kill_switch: string | null };
+type OnchainBalances = {
+  address: string;
+  pol: number | null;
+  usdc_e: number | null;
+  usdc_native: number | null;
+  error: string | null;
+};
+type OnchainWallet = {
+  id: number;
+  label: string;
+  address: string;
+  funder_address: string | null;
+  is_active: boolean;
+  balances: OnchainBalances;
+};
+type OnchainResp = { wallets: OnchainWallet[]; note?: string };
+
 type Position = {
   market_id: string;
   slug: string | null;
@@ -49,6 +66,14 @@ export default function Home() {
     authed ? "/positions" : null,
     (p: string) => adminApi.get(p) as Promise<Position[]>,
     { refreshInterval: 15000 },
+  );
+  // /wallets/onchain — live POL + USDC.e from Polygon. Admin-only because
+  // it reveals the bot wallet addresses. Polls every 30s (RPC isn't free
+  // and balances don't change that fast).
+  const { data: chain } = useSWR<OnchainResp>(
+    authed ? "/wallets/onchain" : null,
+    (p: string) => adminApi.get(p) as Promise<OnchainResp>,
+    { refreshInterval: 30000 },
   );
 
   // Admin token persists across pages via sessionStorage. We seed the input
@@ -94,11 +119,43 @@ export default function Home() {
       )}
 
       <section className="grid grid-cols-4 gap-4">
-        <Stat k="Equity"     v={last ? `$${last.equity.toFixed(2)}` : "—"} />
+        <Stat k={`Equity (${hh?.mode ?? "paper"})`}
+              v={last ? `$${last.equity.toFixed(2)}` : "—"} />
         <Stat k="Realized"   v={last ? `$${last.realized.toFixed(2)}` : "—"} />
         <Stat k="Unrealized" v={last ? `$${last.unrealized.toFixed(2)}` : "—"} />
         <Stat k="Open"       v={last ? String(last.open) : "—"} />
       </section>
+
+      {authed && chain && chain.wallets.length > 0 && (
+        <section className="card">
+          <div className="flex items-baseline justify-between mb-2">
+            <h2 className="text-sm k">Bot wallet — on-chain (Polygon, live)</h2>
+            <span className="text-xs text-muted">refresh 30s</span>
+          </div>
+          {chain.wallets.map(w => (
+            <div key={w.id} className="grid grid-cols-4 gap-4 py-2 border-t border-[#1c1c25] first:border-t-0">
+              <div>
+                <div className="text-xs text-muted">{w.label}</div>
+                <div className="text-xs font-mono" title={w.address}>
+                  {w.address.slice(0, 6)}…{w.address.slice(-4)}
+                </div>
+              </div>
+              <Stat k="USDC.e"
+                    v={w.balances.usdc_e == null ? "—" : `$${w.balances.usdc_e.toFixed(2)}`} />
+              <Stat k="USDC (native)"
+                    v={w.balances.usdc_native == null ? "—" :
+                       w.balances.usdc_native < 0.01 ? "—" : `$${w.balances.usdc_native.toFixed(2)}`} />
+              <Stat k="POL (gas)"
+                    v={w.balances.pol == null ? "—" : `${w.balances.pol.toFixed(4)}`} />
+              {w.balances.error && (
+                <div className="col-span-4 text-xs text-danger">
+                  RPC error: {w.balances.error}
+                </div>
+              )}
+            </div>
+          ))}
+        </section>
+      )}
 
       <section className="card">
         <div className="flex items-baseline justify-between mb-2">

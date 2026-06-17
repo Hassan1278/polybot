@@ -1,13 +1,54 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from polybot.chain import read_balances
 from polybot.db import get_session
-from polybot.models import Wallet, WalletStats
+from polybot.models import Wallet, WalletCredential, WalletStats
+from services.api.deps import require_admin
 
 router = APIRouter()
+
+
+@router.get("/onchain", dependencies=[Depends(require_admin)])
+async def list_onchain_balances(s: AsyncSession = Depends(get_session)) -> dict:
+    """Read live on-chain POL + USDC.e balances for every bot wallet
+    credential in the DB.
+
+    Admin-only because (1) it reveals the bot wallet address(es) and
+    (2) it hits the Polygon RPC, which we don't want unauth'd callers
+    to spam. Each balance read is ~80 ms (single eth_call), so we run
+    them in parallel via asyncio.to_thread.
+    """
+    rows = (
+        await s.execute(
+            select(WalletCredential).where(WalletCredential.is_active.is_(True))
+        )
+    ).scalars().all()
+    if not rows:
+        return {"wallets": [], "note": "no active wallet credentials configured"}
+
+    results = await asyncio.gather(
+        *(asyncio.to_thread(read_balances, w.address) for w in rows),
+        return_exceptions=False,
+    )
+    return {
+        "wallets": [
+            {
+                "id":             w.id,
+                "label":          w.label,
+                "address":        w.address,
+                "funder_address": w.funder_address,
+                "is_active":      w.is_active,
+                "balances":       bal,
+            }
+            for w, bal in zip(rows, results)
+        ],
+    }
 
 
 @router.get("")
