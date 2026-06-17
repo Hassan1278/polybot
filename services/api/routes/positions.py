@@ -55,7 +55,7 @@ async def _safe_midpoint(c: ClobClient, token_id: str | None) -> float | None:
         return None
 
 
-@router.get("")
+@router.get("", dependencies=[Depends(require_admin)])
 async def list_positions(
     *,
     include_closed: bool = False,
@@ -172,35 +172,63 @@ class ClosePositionBody(BaseModel):
 @router.post("/close", dependencies=[Depends(require_admin)])
 async def close_one_position(
     body: ClosePositionBody = Body(...),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     """Close a single open position immediately at best bid (paper only).
 
     `fraction` lets the operator partial-close (e.g. 0.5 = sell half).
     Defaults to full close.
 
-    Returns the resulting Fill record or a rejection reason. Audited.
+    Returns the resulting Fill record or a rejection reason. Audited
+    BEFORE the close-attempt — even a crash mid-close leaves a record
+    of who tried what. The audit-after-side-effects pattern that lived
+    here lost the intent on any exception in paper_close_position.
     """
+    # Resolve actor BEFORE the side effect so it survives crashes.
+    from services.api.rate_limit import _client_ip as _safe_ip
+    actor = f"admin@{_safe_ip(request)}" if request else "admin"
+
+    # Step 1: write an INTENT row so we know who attempted this close
+    # even if the side effect crashes the request.
+    try:
+        async with session_scope() as s:
+            s.add(AuditLog(
+                actor=actor,
+                event="position_close_attempt",
+                payload={
+                    "market_id": body.market_id,
+                    "outcome": body.outcome,
+                    "fraction": body.fraction,
+                },
+            ))
+    except Exception:  # noqa: BLE001
+        log.exception("close_one_audit_attempt_failed")
+
+    # Step 2: execute the close.
     result = await paper_close_position(
         market_id=body.market_id,
         outcome=body.outcome,
         fraction=body.fraction,
     )
-    # Audit + publish so the dashboard sees it on the fill stream.
+
+    # Step 3: write the RESULT row + publish for the dashboard fill stream.
     try:
         async with session_scope() as s:
             s.add(AuditLog(
-                actor="manual_close",
-                event="position_close",
+                actor=actor,
+                event="position_close_result",
                 payload={
                     "market_id": body.market_id,
                     "outcome": body.outcome,
                     "fraction": body.fraction,
                     "result_status": result.get("status") if isinstance(result, dict) else None,
+                    "reason": result.get("reason") if isinstance(result, dict) else None,
                 },
             ))
-        await publish("fill:new", {"signal_id": None, "result": result, "mode": "paper"})
+        await publish("fill:new", {"signal_id": None, "result": result, "mode": "paper",
+                                    "source": "manual_close"})
     except Exception:  # noqa: BLE001
-        log.exception("close_one_position_side_effects_failed")
+        log.exception("close_one_audit_result_failed")
     return result
 
 
@@ -237,6 +265,14 @@ async def close_all_positions() -> dict[str, Any]:
             rejected.append({"market_id": r.market_id, "outcome": r.outcome,
                              "error": f"{type(exc).__name__}:{exc}"})
             continue
+        # Per-iteration audit + publish — without this, a crash mid-loop
+        # leaves DB positions closed with no forensic record of which
+        # closes succeeded and no live-feed event for the dashboard.
+        try:
+            await publish("fill:new", {"signal_id": None, "result": result,
+                                        "mode": "paper", "source": "close_all"})
+        except Exception:  # noqa: BLE001
+            log.exception("close_all_publish_failed")
         if isinstance(result, dict) and result.get("status") in (
             "filled", "submitted", "partial"
         ):

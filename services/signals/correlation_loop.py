@@ -138,6 +138,19 @@ async def correlation_loop(beacon=None) -> None:
     periodic_task = asyncio.create_task(periodic_wake())
     periodic_task.add_done_callback(_on_task_done)
 
+    # On parent cancellation (e.g. SIGTERM during container shutdown)
+    # propagate to the child tasks so Redis pubsub subscriptions get
+    # released cleanly. Without this they sit idle until the connection
+    # is GC'd by Redis 60-90 s later. Use weakref so we don't keep
+    # the tasks alive past their natural lifetime.
+    import atexit
+    def _cleanup_children() -> None:
+        if not listener_task.done():
+            listener_task.cancel()
+        if not periodic_task.done():
+            periodic_task.cancel()
+    atexit.register(_cleanup_children)
+
     # Heartbeat bookkeeping — covers a rolling heartbeat_interval_s window.
     hb_last = asyncio.get_event_loop().time()
     hb_trades_seen = 0

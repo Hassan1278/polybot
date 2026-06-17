@@ -75,7 +75,16 @@ def _patch_cfg(monkeypatch, *, max_position_usdc=25.0, max_per_market=25.0,
         "drawdown": {"max_daily_loss_usdc": max_daily_loss},
         "execution": {"max_orders_per_minute": max_orders_min},
     }
-    monkeypatch.setattr(risk_mod.risk_cfg, "get", lambda: cfg)
+    # Old: risk.py imported risk_cfg directly from polybot.yaml_config and
+    # patched its .get(). The runtime_config refactor switched to
+    # merged_risk() which reads YAML + Redis overrides. Mock that path
+    # instead. Same shape (dict with position / drawdown / execution).
+    async def _merged_risk(mode=None):
+        return cfg
+    monkeypatch.setattr(risk_mod, "merged_risk", _merged_risk)
+    async def _current_mode():
+        return "paper"
+    monkeypatch.setattr(risk_mod, "current_mode", _current_mode)
 
 
 def _patch_kill(monkeypatch, status=None):

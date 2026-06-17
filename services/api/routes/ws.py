@@ -78,10 +78,19 @@ async def ws_endpoint(ws: WebSocket) -> None:
         asyncio.create_task(forward("kill:clear")),
     ]
     try:
-        await ws.receive_text()        # block until client disconnects
+        # Drain ALL client frames until disconnect — the previous code
+        # returned after the FIRST receive_text, tearing down the
+        # forward tasks even though the client was still subscribed.
+        # The dashboard's live trade/fill stream would silently die after
+        # the first ping/heartbeat message.
+        while True:
+            await ws.receive_text()
     except WebSocketDisconnect:
         pass
     finally:
         for t in tasks:
             t.cancel()
+        # Await cancellation so we don't leak Redis pubsub subscriptions
+        # past the WebSocket disconnect (each forward holds a pubsub).
+        await asyncio.gather(*tasks, return_exceptions=True)
         log.info("ws_client_disconnected")

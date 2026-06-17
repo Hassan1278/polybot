@@ -238,6 +238,11 @@ class ClobClient(HttpClient):
     ) -> dict[str, Any]:
         c = self._signed_client()
         # py-clob-client-v2 is sync — run in a thread so we don't block the loop.
+        # Wrap in a 20 s timeout so a wedged HTTP call (network blip,
+        # signer hanging on Magic SDK) doesn't park the executor's
+        # consumer indefinitely. asyncio.wait_for cancels the to_thread
+        # task on timeout (the underlying HTTP request will still complete
+        # eventually, but we no longer wait for it).
         import asyncio
         from py_clob_client_v2.clob_types import OrderArgs  # type: ignore
 
@@ -246,12 +251,12 @@ class ClobClient(HttpClient):
             signed = c.create_order(args)
             return c.post_order(signed, order_type)
 
-        return await asyncio.to_thread(_do)
+        return await asyncio.wait_for(asyncio.to_thread(_do), timeout=20.0)
 
     async def cancel(self, order_id: str) -> dict[str, Any]:
         c = self._signed_client()
         import asyncio
-        return await asyncio.to_thread(c.cancel, order_id)
+        return await asyncio.wait_for(asyncio.to_thread(c.cancel, order_id), timeout=10.0)
 
     async def cancel_all(self) -> dict[str, Any]:
         c = self._signed_client()

@@ -31,7 +31,8 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from polybot.crypto import encrypt
-from polybot.db import get_session
+from polybot.db import get_session, session_scope
+from polybot.models import AuditLog
 from polybot.logging import get_logger
 from polybot.models import WalletCredential
 from polybot.runtime_config import (
@@ -60,12 +61,16 @@ _LIVE_SWITCH_SKEW_S = 60
 
 
 def _client_ip(req: Request) -> str:
-    # Trust X-Forwarded-For only behind Caddy (which sets it). Local dev
-    # without a proxy reads req.client.host directly.
-    xff = req.headers.get("x-forwarded-for", "")
-    if xff:
-        return xff.split(",")[0].strip()
-    return req.client.host if req.client else "unknown"
+    """Resolve client IP for audit-log attribution.
+
+    Delegates to services.api.rate_limit._client_ip which already enforces
+    the TRUSTED_PROXIES allowlist. The naive XFF-then-fallback pattern
+    that lived here let an attacker spoof the audit log's actor field —
+    a critical accountability gap when post-incident review needs to
+    know who flipped LIVE / added a wallet / cleared the kill switch.
+    """
+    from services.api.rate_limit import _client_ip as _safe_client_ip
+    return _safe_client_ip(req)
 
 
 # ---- Effective settings read ----------------------------------------------
@@ -429,13 +434,16 @@ async def list_wallets(s: AsyncSession = Depends(get_session)) -> list[dict[str,
     dependencies=[Depends(require_admin)],
     status_code=status.HTTP_201_CREATED,
 )
-async def add_wallet(
-    body: WalletCreate, request: Request,
-    s: AsyncSession = Depends(get_session),
-) -> dict[str, Any]:
+async def add_wallet(body: WalletCreate, request: Request) -> dict[str, Any]:
     """Encrypt + insert a new wallet. Private key is AAD-bound to its
     address so a stolen ciphertext row can't be decrypted into a
-    different address slot. The response NEVER echoes the key."""
+    different address slot. The response NEVER echoes the key.
+
+    CRITICAL: must use `session_scope()` (which commits on success) — the
+    legacy `get_session` FastAPI dependency only yields and never commits,
+    so flushed-but-not-committed writes silently rolled back. Every
+    dashboard "Add wallet" click was a data loss until this fix.
+    """
     pk = body.private_key.strip()
     # Normalise to bytes — most operators paste a 0x-prefixed hex string.
     if pk.startswith("0x"):
@@ -447,48 +455,70 @@ async def add_wallet(
         pk_bytes = body.private_key.strip().encode("utf-8")
     aad = f"wallet:{body.address.lower()}:signing".encode()
     ciphertext = encrypt(pk_bytes, aad=aad)
+    actor = f"admin@{_client_ip(request)}"
 
-    # Deactivate previous active wallet so there's always exactly one signer.
-    await s.execute(
-        update(WalletCredential)
-        .where(WalletCredential.is_active.is_(True))
-        .values(is_active=False)
-    )
-    new = WalletCredential(
-        label=body.label, address=body.address.lower(),
-        funder_address=body.funder_address.lower(),
-        signature_type=body.signature_type,
-        encrypted_private_key=ciphertext,
-        is_active=True,
-        created_at=datetime.now(tz=timezone.utc),
-    )
-    s.add(new)
-    await s.flush()
+    async with session_scope() as s:
+        # Deactivate previous active wallet so there's always exactly one signer.
+        await s.execute(
+            update(WalletCredential)
+            .where(WalletCredential.is_active.is_(True))
+            .values(is_active=False)
+        )
+        new = WalletCredential(
+            label=body.label, address=body.address.lower(),
+            funder_address=body.funder_address.lower(),
+            signature_type=body.signature_type,
+            encrypted_private_key=ciphertext,
+            is_active=True,
+            created_at=datetime.now(tz=timezone.utc),
+        )
+        s.add(new)
+        # Audit log — every wallet credential add must be reconstructable
+        # post-incident. Never log the plaintext key (it's already wiped
+        # from the request body at this point).
+        s.add(AuditLog(
+            actor=actor,
+            event="wallet_credential_added",
+            payload={
+                "address": new.address, "funder_address": new.funder_address,
+                "label": new.label, "signature_type": new.signature_type,
+            },
+        ))
+        await s.flush()
+        wallet_id = new.id
+        wallet_addr = new.address
+        wallet_funder = new.funder_address
     log.info(
         "wallet_credential_added",
-        wallet_id=new.id, address=new.address, label=new.label,
-        actor=f"admin@{_client_ip(request)}",
+        wallet_id=wallet_id, address=wallet_addr, label=body.label, actor=actor,
     )
     return {
-        "id": new.id, "address": new.address, "funder_address": new.funder_address,
-        "label": new.label, "is_active": True,
+        "id": wallet_id, "address": wallet_addr, "funder_address": wallet_funder,
+        "label": body.label, "is_active": True,
     }
 
 
 @router.delete("/wallet/{wallet_id}", dependencies=[Depends(require_admin)])
-async def soft_delete_wallet(
-    wallet_id: int, request: Request,
-    s: AsyncSession = Depends(get_session),
-) -> dict[str, Any]:
-    row = (await s.execute(
-        select(WalletCredential).where(WalletCredential.id == wallet_id)
-    )).scalar_one_or_none()
-    if row is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "wallet not found")
-    row.is_active = False
+async def soft_delete_wallet(wallet_id: int, request: Request) -> dict[str, Any]:
+    """Soft-disable a wallet credential. Same commit-fix as add_wallet —
+    moved off get_session() so the soft-delete actually persists."""
+    actor = f"admin@{_client_ip(request)}"
+    async with session_scope() as s:
+        row = (await s.execute(
+            select(WalletCredential).where(WalletCredential.id == wallet_id)
+        )).scalar_one_or_none()
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "wallet not found")
+        prev_active = row.is_active
+        row.is_active = False
+        s.add(AuditLog(
+            actor=actor,
+            event="wallet_credential_disabled",
+            payload={"wallet_id": wallet_id, "address": row.address,
+                     "was_active": prev_active},
+        ))
     log.info(
         "wallet_credential_disabled",
-        wallet_id=wallet_id, address=row.address,
-        actor=f"admin@{_client_ip(request)}",
+        wallet_id=wallet_id, actor=actor,
     )
     return {"id": wallet_id, "is_active": False}

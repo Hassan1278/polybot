@@ -1,4 +1,4 @@
-"""Single-whale follower — stub strategy demonstrating the protocol.
+"""Single-whale follower — second strategy demonstrating the protocol.
 
 Premise: instead of waiting for a CLUSTER of smart-money wallets to align,
 follow ONE big wallet (the "whale") as soon as they place a trade above
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from polybot.logging import get_logger
@@ -70,7 +71,6 @@ class WhaleFollower(SignalStrategy):
             return []
         df = recent_trades
         try:
-            now = time.time()
             fresh = df[df["wallet"].str.lower() == self.address]
             if fresh.empty:
                 return []
@@ -79,9 +79,14 @@ class WhaleFollower(SignalStrategy):
             fresh = fresh.sort_values("ts", ascending=False).drop_duplicates(
                 subset=["market_id", "outcome", "side"], keep="first",
             )
-            # Drop trades older than lookback window.
-            cutoff_ts = now - self.lookback_min * 60.0
-            fresh = fresh[fresh["ts"].astype(float) >= cutoff_ts]
+            # Drop trades older than lookback window. The trades DataFrame
+            # stores `ts` as a tz-aware datetime (matches the SQL column).
+            # The old `.astype(float)` either erroneously cast to ns-since-
+            # epoch (~10^18) or raised on tz-aware values, making the
+            # cutoff comparison a no-op or a crash. Use a datetime cutoff
+            # and compare directly — same idiom as cluster_active_wallets.
+            cutoff_dt = datetime.now(tz=timezone.utc) - timedelta(minutes=self.lookback_min)
+            fresh = fresh[fresh["ts"] >= cutoff_dt]
             # Notional gate.
             fresh = fresh[fresh["notional_usdc"].astype(float) >= self.min_notional]
         except (KeyError, AttributeError):

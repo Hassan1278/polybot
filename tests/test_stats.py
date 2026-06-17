@@ -25,16 +25,19 @@ def test_wallet_stats_empty():
 
 
 def test_wallet_stats_profitable():
-    df = pd.DataFrame([
-        _t(60, m="M1", s="BUY",  n=10, p=0.3, sz=33),
-        _t(50, m="M1", s="SELL", n=20, p=0.6, sz=33),
-        _t(40, m="M2", s="BUY",  n=10, p=0.5, sz=20),
-        _t(30, m="M2", s="SELL", n=15, p=0.75, sz=20),
-    ])
+    # Need at least MIN_DECISIONS_FOR_WR=5 decided positions for the
+    # function to commit to a win-rate (anti-overfit guard). Generate 5
+    # profitable closed positions instead of 2 — preserves the original
+    # intent ("100% win-rate") but respects the new threshold.
+    trades = []
+    for i, mid in enumerate(["M1", "M2", "M3", "M4", "M5"]):
+        trades.append(_t(60 - i * 10, m=mid, s="BUY",  n=10, p=0.3, sz=33))
+        trades.append(_t(50 - i * 10, m=mid, s="SELL", n=20, p=0.6, sz=33))
+    df = pd.DataFrame(trades)
     s = wallet_stats_from_trades(df, window_days=None)
     assert s["pnl_usdc"] > 0
     assert s["win_rate"] == 1.0
-    assert s["trade_count"] == 4
+    assert s["trade_count"] == 10
 
 
 def test_cluster_min_wallets():

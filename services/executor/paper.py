@@ -216,22 +216,30 @@ async def close_position(market_id: str, outcome: str, fraction: float = 1.0) ->
     c = ClobClient()
     try:
         book = await c.book(token_id)
-        mid = None
+        # Fallback price for the no-bids path. `best_mark` chains
+        # midpoint → last-trade-price, so a resolved market that has
+        # /midpoint returning 0 (because the orderbook is wiped) still
+        # gets a usable mark from the last printed trade (typically
+        # $0.999 / $0.001 for the resolution-reveal). Previously this
+        # only tried /midpoint, which made every settled-but-not-yet-
+        # flipped position un-closable via the manual button.
+        fallback_mark = None
         if not book.get("bids"):
             try:
-                mid = await c.midpoint(str(token_id))
+                fallback_mark = await c.best_mark(str(token_id))
             except Exception:  # noqa: BLE001
-                mid = None
+                fallback_mark = None
     finally:
         await c.close()
 
     bids = book.get("bids")
     if not bids:
-        if CONFIG.sell_fallback_to_midpoint and mid and mid > 0:
-            notional = target_shares * float(mid)
+        if CONFIG.sell_fallback_to_midpoint and fallback_mark and fallback_mark > 0:
+            notional = target_shares * float(fallback_mark)
             return await _execute_sell_at_price(
                 signal_id=None, market_id=market_id, outcome=outcome,
-                size_usdc=notional, fill_price=float(mid), source="midpoint",
+                size_usdc=notional, fill_price=float(fallback_mark),
+                source="best_mark",
             )
         return await _record_reject(None, market_id, outcome, "SELL", "no_bids")
 
@@ -272,8 +280,23 @@ async def settle_resolved_markets() -> list[dict]:
         )).all()
 
         for pos, market_outcome in rows:
-            settled_price = 1.0 if (market_outcome and
-                                    market_outcome.upper() == pos.outcome.upper()) else 0.0
+            # Skip resolutions where Market.outcome is NULL — UMA voided the
+            # market, the resolution is ambiguous, or the resolver hasn't
+            # filled in the winning outcome yet. Treating NULL as "your
+            # outcome lost" would zero EVERY position (including correct
+            # ones), wiping legitimate equity on a void/ambiguous
+            # resolution. Leave the position open until an outcome is
+            # actually reported; the next pnl_loop iteration retries.
+            if not market_outcome:
+                log.warning(
+                    "paper_settle_skipped_no_outcome",
+                    market=pos.market_id,
+                    reason="market.outcome is NULL — likely void or pending UMA finalisation",
+                )
+                continue
+            settled_price = 1.0 if (
+                market_outcome.upper() == pos.outcome.upper()
+            ) else 0.0
             size = float(pos.size_shares)
             avg = float(pos.avg_price)
             realized_delta = (settled_price - avg) * size  # fees already booked at entry

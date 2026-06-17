@@ -56,7 +56,7 @@ class _FakeResult:
 class _FakeSession:
     """Async session double — records `add()`s, returns canned `execute()`s."""
 
-    def __init__(self, market_row=("YES_TOK", "NO_TOK")):
+    def __init__(self, market_row=("YES_TOK", "NO_TOK", None)):
         self.added: list = []
         self._market_row = market_row
         self.execute = AsyncMock(side_effect=self._execute)

@@ -33,7 +33,7 @@ type Position = {
 export default function Home() {
   const { data: hh, error: hErr } = useSWR<Health>("/health", fetcher, { refreshInterval: 5000 });
   const { data: pnl, error: pErr } = useSWR<Pnl[]>("/pnl?mode=paper&limit=720", fetcher, { refreshInterval: 30000 });
-  const { data: positions, error: posErr } = useSWR<Position[]>("/positions", fetcher, { refreshInterval: 15000 });
+  const { data: positions, error: posErr, mutate: mutatePositions } = useSWR<Position[]>("/positions", fetcher, { refreshInterval: 15000 });
 
   // Admin token persists across pages via sessionStorage. We seed the input
   // from sessionStorage on mount so the user doesn't have to re-enter it
@@ -97,7 +97,7 @@ export default function Home() {
               {open.length} open · live mark every 15s
             </span>
             {authed && open.length > 0 && (
-              <CloseAllButton onDone={() => { /* SWR auto-refreshes */ }} />
+              <CloseAllButton onDone={() => mutatePositions()} />
             )}
           </div>
         </div>
@@ -125,7 +125,12 @@ export default function Home() {
               </thead>
               <tbody>
                 {open.map(p => (
-                  <PositionRow key={`${p.market_id}-${p.outcome}`} p={p} authed={authed} />
+                  <PositionRow
+                    key={`${p.market_id}-${p.outcome}`}
+                    p={p}
+                    authed={authed}
+                    onClosed={() => mutatePositions()}
+                  />
                 ))}
               </tbody>
             </table>
@@ -257,27 +262,49 @@ function Stat({ k, v }: { k: string; v: string }) {
   return <div className="card"><div className="k">{k}</div><div className="v">{v}</div></div>;
 }
 
-function PositionRow({ p, authed }: { p: Position; authed: boolean }) {
+function PositionRow({
+  p, authed, onClosed,
+}: {
+  p: Position;
+  authed: boolean;
+  onClosed: () => void;
+}) {
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<"ok" | "err" | null>(null);
   const [errMsg, setErrMsg] = useState<string | null>(null);
 
+  // Map raw reject reasons to operator-friendly messages. The previous
+  // tooltip just showed the raw "no_bids" / "insufficient_depth" which
+  // doesn't tell the user whether to retry or wait.
+  const friendlyError = (raw: string | undefined): string => {
+    if (!raw) return "rejected";
+    if (raw === "no_bids") return "no bids + no fallback price — wait for resolution";
+    if (raw === "insufficient_depth") return "thin book — try again or wait";
+    if (raw === "no_position") return "already closed";
+    if (raw === "market_unknown") return "market not in DB — restart needed";
+    if (raw === "no_token_id") return "market metadata missing";
+    return raw;
+  };
+
   const onClose = async () => {
-    if (!confirm(`Close ${p.outcome} on ${p.question?.slice(0, 60) ?? p.market_id.slice(0, 14)}? Sells at best bid.`)) return;
+    if (!confirm(`Close ${p.outcome} on ${p.question?.slice(0, 60) ?? p.market_id.slice(0, 14)}? Sells at best bid (or best mark if book empty).`)) return;
     setBusy(true); setErrMsg(null);
     try {
       const r = await adminApi.post("/positions/close", {
         market_id: p.market_id, outcome: p.outcome, fraction: 1.0,
-      }) as { status?: string; error?: string };
+      }) as { status?: string; reason?: string; error?: string };
       if (r?.status === "filled" || r?.status === "submitted" || r?.status === "partial") {
         setDone("ok");
+        // Trigger immediate SWR refresh so the row disappears from
+        // the live table instead of waiting up to 15 s for the auto-poll.
+        setTimeout(onClosed, 500);
       } else {
         setDone("err");
-        setErrMsg(r?.error ?? r?.status ?? "rejected");
+        setErrMsg(friendlyError(r?.reason ?? r?.error ?? r?.status));
       }
     } catch (e) {
       setDone("err");
-      setErrMsg(String(e instanceof Error ? e.message : e));
+      setErrMsg(String(e instanceof Error ? e.message : e).slice(0, 100));
     } finally {
       setBusy(false);
     }
@@ -304,16 +331,23 @@ function PositionRow({ p, authed }: { p: Position; authed: boolean }) {
       <td className="p-2 text-right">
         {authed && (
           done === "ok" ? (
-            <span className="text-accent text-xs">closed</span>
+            <span className="text-accent text-xs">✓ closed</span>
           ) : (
-            <button
-              onClick={onClose}
-              disabled={busy}
-              className="text-xs px-2 py-1 rounded border border-danger/40 text-danger hover:bg-danger/10 disabled:opacity-40"
-              title={errMsg ?? "Sell at best bid (paper mode)"}
-            >
-              {busy ? "…" : done === "err" ? "retry" : "close"}
-            </button>
+            <div className="flex items-center gap-1 justify-end">
+              <button
+                onClick={onClose}
+                disabled={busy}
+                className="text-xs px-2 py-1 rounded border border-danger/40 text-danger hover:bg-danger/10 disabled:opacity-40"
+                title={errMsg ?? "Sell at best bid (paper mode)"}
+              >
+                {busy ? "…" : done === "err" ? "retry" : "close"}
+              </button>
+              {errMsg && done === "err" && (
+                <span className="text-[10px] text-muted max-w-[120px] truncate" title={errMsg}>
+                  {errMsg}
+                </span>
+              )}
+            </div>
           )
         )}
       </td>

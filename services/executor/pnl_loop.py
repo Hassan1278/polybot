@@ -59,16 +59,24 @@ async def _equity_paper() -> tuple[float, float, float, int]:
         OLD formula:        100 - 30 + 0 + 10 = $80   (off by $30 = cost)
         NEW formula:        100 + 0 + 10 = $110       ✓
     """
+    # Compute realized from ALL positions (no Market join). A briefly-missing
+    # Market row (ingest race, market_id rename, retention drop) would
+    # otherwise drop that position's realized PnL from the equity total —
+    # equity would shrink spuriously, drawdown alerts could mis-fire.
     async with session_scope() as s:
+        realized_total = (await s.execute(
+            select(func.coalesce(func.sum(Position.realized_pnl_usdc), 0.0))
+            .where(Position.wallet == "PAPER")
+        )).scalar_one()
         rows = (await s.execute(
             select(Position.market_id, Position.outcome, Position.size_shares, Position.avg_price,
                    Position.realized_pnl_usdc, Market.yes_token_id, Market.no_token_id,
                    Market.outcomes)
-            .join(Market, Market.market_id == Position.market_id)
+            .join(Market, Market.market_id == Position.market_id, isouter=True)
             .where(Position.wallet == "PAPER")
         )).all()
 
-    realized = sum(r[4] for r in rows)
+    realized = float(realized_total or 0.0)
     unrealized = 0.0
     open_n = 0
     if rows:

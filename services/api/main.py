@@ -93,5 +93,5 @@ app.include_router(admin.router,   prefix="/admin",           tags=["admin"], de
 app.include_router(settings_routes.router, prefix="/admin/settings", tags=["admin", "settings"], dependencies=_admin_rl)
 app.include_router(metrics.router, prefix="/metrics",         tags=["metrics"])
 app.include_router(pipeline.router, prefix="/pipeline",       tags=["pipeline"])
-app.include_router(positions.router, prefix="/positions",     tags=["positions"])
+app.include_router(positions.router, prefix="/positions",     tags=["positions"], dependencies=_admin_rl)
 app.include_router(ws.router)                                 # /ws
