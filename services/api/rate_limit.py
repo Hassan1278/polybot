@@ -18,6 +18,7 @@ mutational).
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Final
 
@@ -35,12 +36,36 @@ _DEFAULT_LIMIT: Final[int] = 60
 _BUCKET_TTL_S: Final[int] = 90
 
 
+def _trusted_proxies() -> set[str]:
+    """Read TRUSTED_PROXIES env (comma-separated IPs). Empty = no trust.
+
+    Only requests whose direct TCP peer (request.client.host) is in this
+    set are allowed to set X-Forwarded-For for rate-limit attribution.
+    Without this, anyone reaching the API directly on port 8000 could
+    spoof XFF to a victim IP and either evade their own bucket OR DoS
+    the victim's bucket. In prod Caddy is the only legitimate XFF setter.
+    """
+    raw = os.environ.get("TRUSTED_PROXIES", "")
+    return {p.strip() for p in raw.split(",") if p.strip()}
+
+
 def _client_ip(request: Request) -> str:
-    """Prefer X-Forwarded-For (set by Caddy in prod), fall back to direct."""
-    xff = request.headers.get("x-forwarded-for", "")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    """Resolve client IP with anti-spoofing.
+
+    XFF is honoured ONLY when the direct peer (Starlette's
+    request.client.host) appears in TRUSTED_PROXIES. Otherwise we ignore
+    XFF entirely — an unverified hop's claim about the original IP can
+    be anything.
+    """
+    direct = request.client.host if request.client else "unknown"
+    trusted = _trusted_proxies()
+    if trusted and direct in trusted:
+        xff = request.headers.get("x-forwarded-for", "")
+        if xff:
+            # Left-most untrusted hop is the closest to the originator we
+            # can trust; we don't try to walk multi-proxy chains here.
+            return xff.split(",")[0].strip()
+    return direct
 
 
 def admin_rate_limit(limit_per_minute: int = _DEFAULT_LIMIT):

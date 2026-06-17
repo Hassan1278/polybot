@@ -250,7 +250,8 @@ async def run_leaderboard() -> None:
                             set_={"category": cat, "is_active": True, "last_seen": now},
                         )
                     )
-                    await session.execute(pg_insert(WalletStats).values(
+                    # UPSERT per migration 0007 — see stats_loop for full context.
+                    ws_values = dict(
                         address=addr,
                         window="30d",
                         pnl_usdc=i["pnl_usdc"],
@@ -265,6 +266,12 @@ async def run_leaderboard() -> None:
                         n_total_positions=i["n_total_positions"],
                         n_trade_days=i["n_trade_days"],
                         computed_at=now,
+                    )
+                    ws_stmt = pg_insert(WalletStats).values(**ws_values)
+                    await session.execute(ws_stmt.on_conflict_do_update(
+                        index_elements=["address", "window"],
+                        set_={k: v for k, v in ws_values.items()
+                              if k not in ("address", "window")},
                     ))
                 summary[cat] = {
                     "kept": len(kept),

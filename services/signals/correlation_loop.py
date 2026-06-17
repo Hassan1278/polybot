@@ -34,6 +34,15 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+# Per the stats.py DEFAULT_* constants — kept aligned to avoid scoring drift
+# between the clusterer's tuning and the runtime defaults.
+from polybot.stats import (  # noqa: E402
+    DEFAULT_HALF_LIFE_SECONDS as _STATS_HL,
+    DEFAULT_K_NOTIONAL as _STATS_KN,
+    DEFAULT_K_WALLETS as _STATS_KW,
+)
+
+
 async def _recent_trades_df(minutes: int) -> pd.DataFrame:
     cutoff = datetime.now(tz=timezone.utc) - timedelta(minutes=minutes)
     async with session_scope() as s:
@@ -54,9 +63,9 @@ async def correlation_loop(beacon=None) -> None:
     # can report liveness even when there are zero trades to process.
     # Time-decay / scoring knobs — read straight from env so we don't have to
     # bloat Settings for tuning experiments. Defaults match polybot.stats.
-    half_life_seconds = _env_float("CORRELATION_HALF_LIFE_SECONDS", 300.0)
-    k_wallets = _env_float("CORRELATION_K_WALLETS", 2.5)
-    k_notional = _env_float("CORRELATION_K_NOTIONAL", 2000.0)
+    half_life_seconds = _env_float("CORRELATION_HALF_LIFE_SECONDS", _STATS_HL)
+    k_wallets = _env_float("CORRELATION_K_WALLETS", _STATS_KW)
+    k_notional = _env_float("CORRELATION_K_NOTIONAL", _STATS_KN)
 
     # Debounce: short when things are happening, long when they're not.
     debounce_busy_s = _env_float("CORRELATION_DEBOUNCE_BUSY_S", 5.0)
@@ -89,16 +98,45 @@ async def correlation_loop(beacon=None) -> None:
     wake_q: asyncio.Queue[None] = asyncio.Queue(maxsize=1)
 
     async def listener() -> None:
-        async for _ in subscribe("trade:new"):
-            # Best-effort wake — if queue already has a pending tick the
-            # put_nowait raises QueueFull and we just drop this one (the
-            # next iteration will still process all fresh trades from DB).
+        # Resilient outer loop — if subscribe() raises (Redis reconnect,
+        # JSON decode error not handled in redis_bus.subscribe), log and
+        # restart instead of dying silently. A dead listener combined with
+        # `await wake_q.get()` below would hang the main loop forever, and
+        # the only signal of trouble would be a missing heartbeat.
+        while True:
+            try:
+                async for _ in subscribe("trade:new"):
+                    try:
+                        wake_q.put_nowait(None)
+                    except asyncio.QueueFull:
+                        pass
+            except Exception:  # noqa: BLE001
+                log.exception("correlation_listener_crashed_restarting")
+                await asyncio.sleep(5)
+
+    async def periodic_wake() -> None:
+        # Defence against a stalled listener: poke the loop every
+        # debounce_idle_s even with zero trade:new events. Cheap fallback
+        # so the heartbeat keeps firing and the wallet-stats freshness
+        # check runs even on a fully quiet market.
+        while True:
+            await asyncio.sleep(debounce_idle_s)
             try:
                 wake_q.put_nowait(None)
             except asyncio.QueueFull:
                 pass
 
-    asyncio.create_task(listener())
+    def _on_task_done(t: asyncio.Task) -> None:
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            log.error("correlation_task_exited", exc=str(exc))
+
+    listener_task = asyncio.create_task(listener())
+    listener_task.add_done_callback(_on_task_done)
+    periodic_task = asyncio.create_task(periodic_wake())
+    periodic_task.add_done_callback(_on_task_done)
 
     # Heartbeat bookkeeping — covers a rolling heartbeat_interval_s window.
     hb_last = asyncio.get_event_loop().time()

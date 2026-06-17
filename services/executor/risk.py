@@ -73,6 +73,19 @@ async def preflight(*, mode: str, market_id: str, category: str | None,
     dd_cfg = cfg.get("drawdown", {})
     exec_cfg = cfg.get("execution", {})
 
+    # 0) input sanity — refuse non-positive sizes, garbage sides, or
+    #    NaN/Inf. Without these the upper-bound checks below pass a
+    #    negative `size_usdc` since the LHS is always smaller than the
+    #    cap, leaving an attacker-pushed Redis payload able to walk
+    #    straight through risk. Validate side too — `place_limit`
+    #    accepts unknown sides as BUY in some venues.
+    if size_usdc is None or not (size_usdc > 0):
+        raise RiskRejection(f"non_positive_size:{size_usdc}")
+    if size_usdc != size_usdc or size_usdc in (float("inf"), float("-inf")):
+        raise RiskRejection(f"size_not_finite:{size_usdc}")
+    if side not in ("BUY", "SELL"):
+        raise RiskRejection(f"bad_side:{side!r}")
+
     # 1) kill switch
     k = await kill_status()
     if k:
@@ -135,12 +148,17 @@ async def preflight(*, mode: str, market_id: str, category: str | None,
         if realised_today <= -float(dd_cfg.get("max_daily_loss_usdc", 50.0)):
             raise RiskRejection(f"daily_loss_breached:{realised_today}")
 
-        # 7) order rate (last 60s)
+        # 7) order rate (last 60s).
+        #    Count fills regardless of mode column — the executor may have
+        #    been booted in paper mode and runtime-flipped to live, so the
+        #    Fill.mode bucket lags the runtime mode by one row until the
+        #    main loop refreshes. Counting across modes still caps total
+        #    submission velocity which is what the gate is for.
         rate_cap = int(exec_cfg.get("max_orders_per_minute", 6))
         recent = (await s.execute(
             select(func.count(Fill.id)).where(
-                and_(Fill.mode == mode,
-                     Fill.ts >= datetime.now(tz=timezone.utc) - timedelta(seconds=60)))
+                Fill.ts >= datetime.now(tz=timezone.utc) - timedelta(seconds=60)
+            )
         )).scalar_one()
         if recent >= rate_cap:
             raise RiskRejection(f"rate_limit:{recent}>={rate_cap}")

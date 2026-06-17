@@ -1,0 +1,9 @@
+# Dashboard-specific build-context exclusions. The root .dockerignore
+# also applies; this file just adds frontend-specific bloat.
+
+node_modules
+.next
+.turbo
+coverage
+.swc
+out

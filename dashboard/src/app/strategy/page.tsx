@@ -3,6 +3,8 @@
 import useSWR from "swr";
 import Link from "next/link";
 import { fetcher } from "@/lib/api";
+import { adminApi } from "@/lib/admin";
+import { useAuthStatus } from "@/lib/auth-status";
 
 type SettingsPayload = {
   mode: "paper" | "live";
@@ -39,11 +41,17 @@ type MetricsPayload = {
  * page or extend this one with a strategy switcher.
  */
 export default function StrategyPage() {
-  const { data: settings } = useSWR<SettingsPayload>("/admin/settings/public", fetcher, {
-    refreshInterval: 30_000,
-    // Falls back to /admin/settings/ if /public not implemented; the
-    // browser only needs read access here.
-  });
+  // /admin/settings/ requires auth — fetch via adminApi (which sends
+  // session OR admin token). Previously the page used the unauthenticated
+  // `fetcher`, got a 401, and the loading state stuck forever showing all
+  // "—" placeholders. The "/public fallback" comment described code that
+  // never existed; dropped.
+  const authed = useAuthStatus();
+  const { data: settings } = useSWR<SettingsPayload>(
+    authed ? "/admin/settings/" : null,
+    (p: string) => adminApi.get(p) as Promise<SettingsPayload>,
+    { refreshInterval: 30_000 },
+  );
   const { data: metrics } = useSWR<MetricsPayload>(
     "/metrics/categories?window=30d&include_marks=false",
     fetcher,

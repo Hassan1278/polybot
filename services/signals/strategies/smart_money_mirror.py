@@ -20,7 +20,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from polybot.logging import get_logger
-from polybot.stats import cluster_active_wallets
+from polybot.stats import (
+    DEFAULT_HALF_LIFE_SECONDS,
+    DEFAULT_K_NOTIONAL,
+    DEFAULT_K_WALLETS,
+    cluster_active_wallets,
+)
 from services.signals.strategies.base import Candidate, SignalStrategy
 
 if TYPE_CHECKING:
@@ -40,13 +45,20 @@ class SmartMoneyMirror(SignalStrategy):
         if recent_trades is None or recent_trades.empty:
             return []
         try:
+            # IMPORTANT: defaults track polybot.stats so the wrapper doesn't
+            # silently override the production-tuned constants. A previous
+            # version hardcoded 2.5/2000/300 — the stats.py raises (2.0/500/900)
+            # were unreachable, scoring math drifted, signals scored low.
             raw = cluster_active_wallets(
                 recent_trades,
                 window_minutes=knobs.get("window_minutes", 30),
-                min_wallets=knobs.get("min_wallets", 3),
-                half_life_seconds=knobs.get("half_life_seconds", 300.0),
-                k_wallets=knobs.get("k_wallets", 2.5),
-                k_notional=knobs.get("k_notional", 2000.0),
+                # Clusterer floor of 2 — the correlation_score gate decides
+                # the final min_wallets per mode, so this is just a hard
+                # floor to prevent meaningless 1-wallet clusters.
+                min_wallets=max(2, int(knobs.get("min_wallets", 2))),
+                half_life_seconds=knobs.get("half_life_seconds", DEFAULT_HALF_LIFE_SECONDS),
+                k_wallets=knobs.get("k_wallets", DEFAULT_K_WALLETS),
+                k_notional=knobs.get("k_notional", DEFAULT_K_NOTIONAL),
             )
         except Exception:  # noqa: BLE001
             log.exception("smart_money_mirror_cluster_failed")

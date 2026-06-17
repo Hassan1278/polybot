@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header, Request
 
 from polybot.redis_bus import kill_clear, kill_set, kill_status
 from services.api.deps import require_admin
@@ -8,15 +8,31 @@ from services.api.deps import require_admin
 router = APIRouter()
 
 
+def _actor(request: Request, x_session_token: str | None) -> str:
+    """Best-effort actor identifier for the audit log."""
+    if x_session_token:
+        return f"session:{x_session_token[:8]}"
+    return f"ip:{request.client.host}" if request.client else "unknown"
+
+
 @router.post("/kill", dependencies=[Depends(require_admin)])
-async def kill(reason: str = "manual") -> dict:
-    await kill_set(reason)
+async def kill(
+    request: Request,
+    reason: str = "manual",
+    x_session_token: str | None = Header(default=None),
+) -> dict:
+    await kill_set(reason, actor=_actor(request, x_session_token))
     return {"killed": True, "reason": reason}
 
 
 @router.post("/kill/clear", dependencies=[Depends(require_admin)])
-async def unkill(by: str = "manual") -> dict:
-    await kill_clear(by)
+async def unkill(
+    request: Request,
+    by: str = "manual",
+    x_session_token: str | None = Header(default=None),
+) -> dict:
+    actor = _actor(request, x_session_token)
+    await kill_clear(by if by != "manual" else actor)
     return {"killed": False, "by": by}
 
 

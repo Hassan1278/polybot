@@ -6,6 +6,7 @@ import { useState, useEffect } from "react";
 import type React from "react";
 import { ADMIN_TOKEN_KEY, getAdminToken, setAdminToken, clearAdminToken } from "@/lib/admin";
 import { getSessionToken } from "@/lib/wallet";
+import { useAuthStatus } from "@/lib/auth-status";
 import ConnectWallet from "@/components/ConnectWallet";
 
 type Pnl = { ts: string; equity: number; realized: number; unrealized: number; open: number };
@@ -39,6 +40,11 @@ export default function Home() {
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  // Subscribes to storage events so the KILL/Clear buttons re-enable as
+  // soon as the user connects MetaMask from the header (previously the
+  // home page only read getSessionToken() during render → buttons stayed
+  // disabled until the user typed in the admin field).
+  const authed = useAuthStatus();
   useEffect(() => {
     const t = getAdminToken();
     if (t) setToken(t);
@@ -201,7 +207,7 @@ export default function Home() {
 
         <div className="flex gap-2 items-center mt-4 flex-wrap">
           <span className="text-xs k">Kill switch:</span>
-          <button disabled={busy || (!token && !getSessionToken())}
+          <button disabled={busy || !authed}
             className="bg-danger text-white px-3 py-2 rounded text-sm disabled:opacity-40"
             onClick={async () => {
               setBusy(true); setMsg(null);
@@ -223,7 +229,7 @@ export default function Home() {
             }}>
             KILL
           </button>
-          <button disabled={busy || (!token && !getSessionToken())}
+          <button disabled={busy || !authed}
             className="bg-accent text-black px-3 py-2 rounded text-sm disabled:opacity-40"
             onClick={async () => {
               setBusy(true); setMsg(null);

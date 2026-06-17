@@ -173,18 +173,28 @@ async def xack(stream: str, group: str, msg_id: str) -> None:
     await client().xack(stream, group, msg_id)
 
 
+# Separate DLQ cap so a poison-message burst on the live stream doesn't
+# silently trim recent DLQ entries before an operator can triage them.
+_DLQ_MAXLEN = 100_000
+
+
 async def xdlq(
     stream: str,
     payload: dict[str, Any],
     error: str,
     *,
     _msg_id: str | None = None,
+    _group: str | None = None,
 ) -> str:
     """Move a poisonous message to `{stream}:dlq` and ack the original.
 
     The DLQ entry captures: original payload, error description, timestamp.
     Operators triage by `XREVRANGE signal:new:dlq + -`. After fixing the
     root cause, replay via `xpublish('signal:new', payload)`.
+
+    `_group` is the consumer group whose pending entry should be acked.
+    Previously this hardcoded `("executors",)` — any future consumer
+    using xdlq leaked unacked PEL entries indefinitely.
     """
     r = client()
     dlq_id = await r.xadd(
@@ -194,13 +204,14 @@ async def xdlq(
             "err": error[:512],
             "orig_id": _msg_id or "",
         },
-        maxlen=_STREAM_MAXLEN,
+        maxlen=_DLQ_MAXLEN,
         approximate=True,
     )
     if _msg_id is not None:
         # Best-effort ack on the original — if it doesn't exist (already
         # ack'd from a prior attempt) Redis returns 0 silently.
-        for group in ("executors",):
+        groups = (_group,) if _group else ("executors",)
+        for group in groups:
             try:
                 await r.xack(stream, group, _msg_id)
             except Exception:  # noqa: BLE001
@@ -244,16 +255,43 @@ async def xautoclaim(
 
 # ---- kill switch ------------------------------------------------------------
 
-async def kill_set(reason: str) -> None:
+async def kill_set(reason: str, *, actor: str | None = None) -> None:
+    """Activate the kill switch.
+
+    `actor` is recorded in the audit log so post-incident forensics know
+    who/what fired it. Previously kill_set had no audit log at all — kill
+    toggles disappeared from the historical record.
+    """
     r = client()
     await r.set(KILL_KEY, reason)
-    await publish("kill:set", {"reason": reason})
+    await publish("kill:set", {"reason": reason, "actor": actor})
+    await _audit_kill("kill_set", reason=reason, actor=actor or "unknown")
 
 
 async def kill_clear(by: str) -> None:
+    """Deactivate the kill switch. `by` doubles as the audit actor."""
     r = client()
     await r.delete(KILL_KEY)
     await publish("kill:clear", {"by": by})
+    await _audit_kill("kill_clear", reason=None, actor=by)
+
+
+async def _audit_kill(event: str, *, reason: str | None, actor: str) -> None:
+    """Best-effort audit-log write. Late import to avoid db→redis circularity."""
+    try:
+        from datetime import datetime, timezone
+
+        from polybot.db import session_scope
+        from polybot.models import AuditLog
+        async with session_scope() as s:
+            s.add(AuditLog(
+                ts=datetime.now(tz=timezone.utc),
+                actor=actor, event=event,
+                payload={"reason": reason} if reason else {},
+            ))
+    except Exception:  # noqa: BLE001
+        # Audit failures must NOT cascade to the kill-switch action itself.
+        log.exception("kill_switch_audit_failed", event=event, actor=actor)
 
 
 async def kill_status() -> str | None:

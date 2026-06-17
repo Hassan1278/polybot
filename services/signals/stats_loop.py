@@ -67,7 +67,10 @@ async def _compute_for_addr(addr: str, *, data: DataClient | None = None) -> Non
             for label, days in WINDOWS.items():
                 trades_df = await _trades_for_window(addr, days)
                 stats = wallet_stats_from_positions(positions, trades_df=trades_df)
-                await s.execute(pg_insert(WalletStats).values(
+                # UPSERT instead of INSERT — migration 0007 made
+                # (address, window) UNIQUE. Without the on_conflict the
+                # gate's SELECT averaged every historical snapshot.
+                values = dict(
                     address=addr,
                     window=label,
                     pnl_usdc=stats["pnl_usdc"],
@@ -82,6 +85,11 @@ async def _compute_for_addr(addr: str, *, data: DataClient | None = None) -> Non
                     n_total_positions=stats["n_total_positions"],
                     n_trade_days=stats["n_trade_days"],
                     computed_at=now,
+                )
+                stmt = pg_insert(WalletStats).values(**values)
+                await s.execute(stmt.on_conflict_do_update(
+                    index_elements=["address", "window"],
+                    set_={k: v for k, v in values.items() if k not in ("address", "window")},
                 ))
     finally:
         if own:

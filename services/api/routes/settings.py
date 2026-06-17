@@ -103,6 +103,28 @@ async def get_mode_endpoint() -> dict[str, str]:
     return {"mode": await current_mode()}
 
 
+@router.get("/mode/live-challenge", dependencies=[Depends(require_admin)])
+async def get_live_challenge() -> dict[str, str]:
+    """Server-issued live-confirm token for the dashboard's mode-switch flow.
+
+    The ModeTab used to require the operator to copy-paste a
+    `docker compose exec api python -c "..."` command that printed an
+    HMAC string. That was the worst UX in the app — and an obvious
+    target for shoulder-surfing. The endpoint is `require_admin`-gated
+    so only the same user already authenticated to set mode can fetch
+    it. The token is short-lived (60 s skew window enforced in
+    `set_mode_endpoint`).
+    """
+    from polybot.config import settings as cfg
+    import hashlib
+    import hmac as _hmac
+
+    ts = int(time.time())
+    secret = cfg.admin_token.get_secret_value().encode()
+    sig = _hmac.new(secret, f"switch-to-live:{ts}".encode(), hashlib.sha256).hexdigest()
+    return {"confirm_token": f"{ts}:{sig}", "epoch": str(ts)}
+
+
 class ModeSwitch(BaseModel):
     mode: str = Field(pattern="^(paper|live)$")
 

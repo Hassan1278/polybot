@@ -142,6 +142,36 @@ async def pipeline_health(
             ts = ts.replace(tzinfo=timezone.utc)
         return ts.isoformat()
 
+    # Per-stage latency p50/p95 over the 60 min window. Diagnoses "why so
+    # few fills" without staring at logs: if decide_lag p95 is multi-minute
+    # the correlation_loop is starving; if execute_lag p95 spikes, the
+    # executor is the choke point. Trades→signals is matched on signal
+    # window-start ≈ trade.ts (best-effort proxy since signals don't carry
+    # the originating trade ts).
+    lat_row = (
+        await s.execute(text(
+            """
+            WITH win AS (
+              SELECT NOW() - INTERVAL '60 minutes' AS lo
+            ),
+            sig AS (
+              SELECT EXTRACT(EPOCH FROM (s.ts - (SELECT lo FROM win))) AS age_s
+              FROM signals s, win
+              WHERE s.ts >= win.lo
+            ),
+            fill AS (
+              SELECT EXTRACT(EPOCH FROM (f.ts - s.ts)) AS dt_s
+              FROM fills f JOIN signals s ON s.id = f.signal_id
+              WHERE f.ts >= (SELECT lo FROM win) AND s.ts <= f.ts
+            )
+            SELECT
+              (SELECT percentile_cont(0.5)  WITHIN GROUP (ORDER BY dt_s) FROM fill) AS exec_p50,
+              (SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY dt_s) FROM fill) AS exec_p95,
+              (SELECT COUNT(*) FROM fill)                                            AS exec_n
+            """
+        ))
+    ).one()
+
     return {
         "ws_subscribed_assets": ws_count,
         "trades_per_min_15m": _per_min(trades_row.cnt),
@@ -157,6 +187,11 @@ async def pipeline_health(
         "markets_uncategorised": int(markets_uncategorised or 0),
         "kill_switch_active": kill_reason is not None,
         "current_mode": settings.trading_mode,
+        "latency_60m": {
+            "execute_p50_s": float(lat_row.exec_p50) if lat_row.exec_p50 is not None else None,
+            "execute_p95_s": float(lat_row.exec_p95) if lat_row.exec_p95 is not None else None,
+            "execute_n": int(lat_row.exec_n or 0),
+        },
     }
 
 
@@ -185,7 +220,12 @@ async def gates_summary(
         )
     ).all()
 
-    per_gate: dict[str, dict[str, int]] = {}
+    # `per_gate` now tracks a `reasons` Counter per gate so the operator
+    # gets "top 3 fail reasons" on the dashboard instead of just
+    # `pass / fail` counts. Cuts diagnose-time for the "0% pass for hours"
+    # scenario from "grep logs" to "glance at the row".
+    from collections import Counter
+    per_gate: dict[str, dict[str, object]] = {}
     total = 0
     total_pass = 0
     for gate_results, gate_pass in rows:
@@ -195,19 +235,45 @@ async def gates_summary(
         if not isinstance(gate_results, dict):
             continue
         for name, result in gate_results.items():
-            bucket = per_gate.setdefault(str(name), {"pass": 0, "fail": 0})
-            # Tolerate shapes other than {"pass": bool, ...} — we only need
-            # to know whether the gate passed. Anything truthy counts as pass.
+            bucket = per_gate.setdefault(
+                str(name),
+                {"pass": 0, "fail": 0, "_reasons": Counter()},
+            )
             passed = False
+            reason = None
             if isinstance(result, dict):
                 passed = bool(result.get("pass"))
+                reason = result.get("reason")
             else:
                 passed = bool(result)
-            bucket["pass" if passed else "fail"] += 1
+            bucket["pass" if passed else "fail"] += 1  # type: ignore[operator]
+            # Bucket reasons by the leftmost token before '=' or ':'.
+            # 'depth=42<75.0' → 'depth', 'no_token_id' → 'no_token_id',
+            # 'cooldown_active:42m' → 'cooldown_active'. Keeps the chart
+            # tight while preserving 'why' at a glance.
+            if not passed and isinstance(reason, str):
+                bucket_reason = reason
+                for sep in ("=", ":", " "):
+                    if sep in bucket_reason:
+                        bucket_reason = bucket_reason.split(sep, 1)[0]
+                        break
+                bucket["_reasons"][bucket_reason] += 1  # type: ignore[index]
+
+    # Materialise top reasons + drop the working Counter from the payload.
+    out_gates: dict[str, dict[str, object]] = {}
+    for name, bucket in per_gate.items():
+        counter: Counter = bucket.pop("_reasons")  # type: ignore[assignment]
+        top = counter.most_common(3)
+        out_gates[name] = {
+            **bucket,
+            "top_reasons": [
+                {"reason": r, "count": c} for r, c in top
+            ],
+        }
 
     return {
         "window_minutes": _GATES_WINDOW_MINUTES,
         "total_signals": total,
         "total_pass": total_pass,
-        "gates": per_gate,
+        "gates": out_gates,
     }

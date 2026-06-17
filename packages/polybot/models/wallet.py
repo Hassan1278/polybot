@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, Index, Integer, String, func
+from sqlalchemy import DateTime, Float, Index, Integer, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from polybot.db import Base
@@ -45,4 +45,10 @@ class WalletStats(Base):
     n_trade_days: Mapped[int] = mapped_column(Integer, default=0)
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    __table_args__ = (Index("ix_wallet_stats_addr_window", "address", "window"),)
+    # Migration 0007 made (address, window) UNIQUE — every insert must use
+    # ON CONFLICT(address, window) DO UPDATE so we keep ONE row per
+    # (wallet, window). Previously the gate averaged historical snapshots.
+    __table_args__ = (
+        UniqueConstraint("address", "window", name="uq_wallet_stats_addr_window"),
+        Index("ix_wallet_stats_addr_window", "address", "window", "computed_at"),
+    )

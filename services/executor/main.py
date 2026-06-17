@@ -61,9 +61,34 @@ async def handle(sig: dict) -> None:
 
     async with session_scope() as s:
         row = (await s.execute(
-            select(Market.category).where(Market.market_id == market_id)
+            select(Market.category, Market.outcomes).where(Market.market_id == market_id)
         )).first()
     category = row[0] if row else None
+    market_outcomes = row[1] if row else None
+
+    # Validate that the signal's outcome actually exists on the market.
+    # Without this, a corrupted/spoofed signal pushes a bogus outcome
+    # through to live.place_live, which then logs token_id_missing and
+    # writes a Fill row with status=rejected — wasting a slot on the
+    # consumer stream and audit log for a message that should have been
+    # caught at the gate. Binary markets default to YES/NO when outcomes
+    # is empty.
+    valid_outcomes: list[str]
+    if market_outcomes:
+        try:
+            valid_outcomes = [str(o).upper() for o in market_outcomes]
+        except Exception:  # noqa: BLE001
+            valid_outcomes = ["YES", "NO"]
+    else:
+        valid_outcomes = ["YES", "NO"]
+    if outcome.upper() not in valid_outcomes:
+        log.warning("executor_bad_outcome", signal=sid,
+                    outcome=outcome, valid=valid_outcomes)
+        async with session_scope() as s:
+            s.add(AuditLog(actor="executor", event="bad_outcome",
+                           payload={"signal_id": sid, "outcome": outcome,
+                                    "valid": valid_outcomes}))
+        return
 
     try:
         await preflight(mode=settings.trading_mode, market_id=market_id,
@@ -79,7 +104,13 @@ async def handle(sig: dict) -> None:
             log.exception("alerts_risk_rejected_failed")
         return
 
-    if settings.trading_mode == "paper":
+    # Route execution by RUNTIME mode (dashboard-flippable), not boot-time.
+    # Without this a paper→live flip leaves the executor still routing to
+    # simulate_fill until the container is restarted — the user's "Switch to
+    # Live" button looked successful but the bot kept paper-trading.
+    from polybot.runtime_config import current_mode as _current_mode
+    exec_mode = await _current_mode()
+    if exec_mode == "paper":
         result = await simulate_fill(
             signal_id=sid, market_id=market_id, outcome=outcome,
             side=side, size_usdc=size_usdc,
@@ -119,7 +150,7 @@ async def handle(sig: dict) -> None:
             signal_id=sid, market_id=market_id, outcome=outcome,
             side=side, size_usdc=size_usdc,
         )
-    await publish("fill:new", {"signal_id": sid, "result": result, "mode": settings.trading_mode})
+    await publish("fill:new", {"signal_id": sid, "result": result, "mode": exec_mode})
 
     if isinstance(result, dict) and result.get("status") in ("filled", "submitted", "partial"):
         try:
@@ -160,7 +191,8 @@ async def signal_consumer() -> None:
         except Exception as exc:  # noqa: BLE001
             log.exception("executor_handle_failed", payload=sig, msg_id=msg_id)
             try:
-                await xdlq(_STREAM, sig, f"{type(exc).__name__}:{exc}", _msg_id=msg_id)
+                await xdlq(_STREAM, sig, f"{type(exc).__name__}:{exc}",
+                           _msg_id=msg_id, _group=_GROUP)
                 await alerts.notify(
                     "critical",
                     "Signal moved to DLQ",

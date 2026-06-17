@@ -19,14 +19,23 @@ class RiskReward:
         entry = float(ctx.extra.get("expected_avg_price") or ctx.candidate.get("avg_price", 0.0))
         if entry <= 0:
             return GateResult(self.name, self.type, False, "no_entry_price")
-        if entry > self.max_entry:
-            return GateResult(self.name, self.type, False, f"entry={entry:.3f}>{self.max_entry}")
-        if entry < self.min_entry:
-            return GateResult(self.name, self.type, False, f"entry={entry:.3f}<{self.min_entry}")
+
+        # Price band is direction-aware. A SELL at 0.95 has the same R:R
+        # profile as a BUY at 0.05 (upside 0.95, downside 0.05). Without
+        # mirroring the band, SELLs near the top of the book (very cheap
+        # "no" outcome bets) were dropped despite excellent R:R.
+        side = ctx.candidate["side"].upper()
+        if side == "BUY":
+            lo, hi = self.min_entry, self.max_entry
+        else:
+            lo, hi = 1.0 - self.max_entry, 1.0 - self.min_entry
+        if entry > hi:
+            return GateResult(self.name, self.type, False, f"entry={entry:.3f}>{hi:.3f}")
+        if entry < lo:
+            return GateResult(self.name, self.type, False, f"entry={entry:.3f}<{lo:.3f}")
 
         # For a BUY on YES at probability p, upside = 1 - p, downside = p.
         # R:R = upside / downside.
-        side = ctx.candidate["side"].upper()
         if side == "BUY":
             upside = 1.0 - entry
             downside = entry

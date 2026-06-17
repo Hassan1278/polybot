@@ -118,7 +118,11 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      - api
+      # Gate SSR start on api healthiness — short-form `- api` only waits for
+      # the container to *start*, so dashboard SSR could 502 immediately on
+      # boot before the api finished its first /health/deep check.
+      api:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:

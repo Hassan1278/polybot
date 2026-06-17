@@ -84,25 +84,37 @@ def downgrade() -> None:
     # drop the partial unique index ------------------------------------------
     op.execute("DROP INDEX IF EXISTS ux_trades_tx_hash")
 
-    # narrow outcome on positions --------------------------------------------
+    # The original downgrade narrowed String(64) → String(8) without first
+    # truncating data — a real prod DB has outcomes like 'TYLOO' or
+    # 'LYNN VISION' that would either error or silently truncate on the
+    # ALTER. We pre-truncate with LEFT(col, 8) so the narrow is at least
+    # safe-by-contract; do the same for the side columns whose String(16)
+    # values include 'BUY'/'SELL' (both ≤ 4 chars so they round-trip).
+    #
+    # If you're rolling back on an empty DB this is a no-op. On a populated
+    # DB you accept the lossy column truncation as part of the downgrade.
+    op.execute("UPDATE positions SET outcome = LEFT(outcome, 8) WHERE LENGTH(outcome) > 8")
     op.alter_column("positions", "outcome",
                     existing_type=sa.String(64), type_=sa.String(8))
 
-    # narrow outcome/side on fills -------------------------------------------
+    op.execute("UPDATE fills SET side = LEFT(side, 8) WHERE LENGTH(side) > 8")
     op.alter_column("fills", "side",
                     existing_type=sa.String(16), type_=sa.String(8))
+    op.execute("UPDATE fills SET outcome = LEFT(outcome, 8) WHERE LENGTH(outcome) > 8")
     op.alter_column("fills", "outcome",
                     existing_type=sa.String(64), type_=sa.String(8))
 
-    # narrow outcome/side on signals -----------------------------------------
+    op.execute("UPDATE signals SET side = LEFT(side, 8) WHERE LENGTH(side) > 8")
     op.alter_column("signals", "side",
                     existing_type=sa.String(16), type_=sa.String(8))
+    op.execute("UPDATE signals SET outcome = LEFT(outcome, 8) WHERE LENGTH(outcome) > 8")
     op.alter_column("signals", "outcome",
                     existing_type=sa.String(64), type_=sa.String(8))
 
-    # narrow outcome/side on trades ------------------------------------------
+    op.execute("UPDATE trades SET side = LEFT(side, 8) WHERE LENGTH(side) > 8")
     op.alter_column("trades", "side",
                     existing_type=sa.String(16), type_=sa.String(8))
+    op.execute("UPDATE trades SET outcome = LEFT(outcome, 8) WHERE LENGTH(outcome) > 8")
     op.alter_column("trades", "outcome",
                     existing_type=sa.String(64), type_=sa.String(8))
 
@@ -113,7 +125,11 @@ def downgrade() -> None:
     op.drop_column("wallet_stats", "n_decisions")
     op.drop_column("wallet_stats", "realized_pnl_usdc")
 
-    # restore NOT NULL + default 0 on rate metrics ---------------------------
+    # Backfill NULLs before restoring NOT NULL — the original ALTER would
+    # fail on any wallet without enough realised data (we explicitly made
+    # these nullable in upgrade() for that very reason).
+    op.execute("UPDATE wallet_stats SET win_rate = 0 WHERE win_rate IS NULL")
+    op.execute("UPDATE wallet_stats SET sharpe   = 0 WHERE sharpe   IS NULL")
     op.alter_column("wallet_stats", "sharpe",
                     existing_type=sa.Float(), nullable=False,
                     server_default="0")

@@ -1,0 +1,52 @@
+# Per-repo .dockerignore. The audit found `dashboard/Dockerfile`'s
+# `COPY . .` would pull in node_modules, .next, .git, and (worst) .env.
+# This file applies to EVERY build context that doesn't ship its own.
+
+.git
+.gitignore
+.gitattributes
+
+# Secrets — never accidentally bake into an image.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python build/cache.
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+*.egg-info
+build/
+dist/
+
+# Node.
+**/node_modules
+**/.next
+**/.turbo
+**/coverage
+
+# Editor / OS.
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Local data & logs (DO NOT ship dev databases).
+var/
+*.log
+logs/
+postgres-data/
+redis-data/
+
+# Plan & scratch directories — not source.
+.claude/
+plans/
+
+# Local-only scripts and notebooks.
+*.ipynb_checkpoints
+scratch/

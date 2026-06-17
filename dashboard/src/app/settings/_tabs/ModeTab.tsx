@@ -111,11 +111,6 @@ export default function ModeTab() {
 
   const switchToLive = async () => {
     setErr(null);
-    const tok = confirmToken.trim();
-    if (!tok) {
-      setErr("Paste a live-confirm token first.");
-      return;
-    }
     const sessionTok = getSessionToken();
     const adminTok = getAdminToken();
     if (!sessionTok && !adminTok) {
@@ -124,6 +119,23 @@ export default function ModeTab() {
     }
     setBusy(true);
     try {
+      // Server-issued live challenge — fetch fresh on the click. No more
+      // copy-paste `docker compose exec` hoop for the operator. The token
+      // is bound to a 60s skew window enforced server-side.
+      let tok = confirmToken.trim();
+      if (!tok) {
+        try {
+          const challenge = await adminApi.get("/admin/settings/mode/live-challenge") as { confirm_token: string };
+          tok = challenge?.confirm_token ?? "";
+        } catch (e) {
+          setErr(`failed to fetch live challenge: ${e instanceof Error ? e.message : String(e)}`);
+          return;
+        }
+      }
+      if (!tok) {
+        setErr("could not obtain live-confirm token");
+        return;
+      }
       // adminApi can't attach a per-call custom header, so go direct to fetch
       // for this one endpoint to pass X-Live-Confirm. Send BOTH auth headers
       // if available (server accepts either).

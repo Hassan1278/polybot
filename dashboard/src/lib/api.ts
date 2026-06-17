@@ -61,7 +61,20 @@ export function openWs(
   } else {
     wsBase = API.replace(/^http/, "ws");
   }
-  const ws = new WebSocket(wsBase + "/ws");
+  // /ws requires either a session token (SIWE) or admin token. Browsers
+  // can't set custom headers on WebSocket handshakes, so we pass auth via
+  // query params — same secrets as the X-Session-Token / X-Admin-Token
+  // sent to /admin/*. Only the connected dashboard sees these; the server
+  // closes unauth'd connections with 1008 BEFORE accept().
+  const params = new URLSearchParams();
+  if (typeof window !== "undefined") {
+    const session = sessionStorage.getItem("polybot_session_token");
+    const admin = sessionStorage.getItem("polybot_admin_token");
+    if (session) params.set("session", session);
+    else if (admin) params.set("token", admin);
+  }
+  const qs = params.toString();
+  const ws = new WebSocket(wsBase + "/ws" + (qs ? "?" + qs : ""));
   ws.onmessage = (e) => {
     try { onMsg(JSON.parse(e.data)); } catch {}
   };

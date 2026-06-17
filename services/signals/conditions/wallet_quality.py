@@ -20,6 +20,8 @@ so downstream gates / position sizing can use them as soft inputs.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from sqlalchemy import and_, select
 
 from polybot.models import WalletStats
@@ -40,6 +42,9 @@ class WalletQuality:
         # Set e.g. to -3.0 to filter only the truly anomalous outliers.
         self.max_negative_sharpe = float(params.get("max_negative_sharpe", float("-inf")))
         self.window = params.get("window", "30d")
+        # Skip wallet rows older than N hours — otherwise a broken stats_loop
+        # silently keeps mirroring week-old skill numbers. 0 = disabled.
+        self.max_stats_age_hours = float(params.get("max_stats_age_hours", 36.0))
 
     async def evaluate(self, ctx: GateContext) -> GateResult:
         if not self.enabled:
@@ -49,13 +54,25 @@ class WalletQuality:
         if not wallets:
             return GateResult(self.name, self.type, False, "no_wallets")
 
+        # Recency filter: skip stale rows. With migration 0007 there's at
+        # most one row per (address, window), but if stats_loop is failing
+        # the existing row's `computed_at` may be days old. Without this
+        # filter the gate silently keeps mirroring stale win-rates.
+        where_clauses = [
+            WalletStats.address.in_(wallets),
+            WalletStats.window == self.window,
+        ]
+        if self.max_stats_age_hours > 0:
+            cutoff = datetime.now(tz=timezone.utc) - timedelta(hours=self.max_stats_age_hours)
+            where_clauses.append(WalletStats.computed_at >= cutoff)
         rows = (await ctx.session.execute(
             select(WalletStats.win_rate, WalletStats.sharpe)
-            .where(and_(
-                WalletStats.address.in_(wallets),
-                WalletStats.window == self.window,
-            ))
+            .where(and_(*where_clauses))
         )).all()
+        # Track coverage so the operator can spot "everyone got permissive pass
+        # because stats_loop broke 3 days ago" — exposed via gate reason.
+        coverage_n = len(rows)
+        coverage_total = len(wallets)
 
         # win_rate / sharpe may be NULL for wallets without enough realised
         # data. Average over whatever we have, separately per metric.
@@ -63,10 +80,16 @@ class WalletQuality:
         sh_vals = [float(r[1]) for r in rows if r[1] is not None]
 
         # No stats at all — be permissive. Downstream gates still filter.
+        # The reason string flags coverage so the operator can spot stale-stats
+        # cascades on the /signals page.
         if not wr_vals and not sh_vals:
             ctx.extra["avg_win_rate"] = None
             ctx.extra["avg_sharpe"] = None
-            return GateResult(self.name, self.type, True, "no_stats — permissive pass")
+            ctx.extra["wallet_quality_coverage"] = (coverage_n, coverage_total)
+            return GateResult(
+                self.name, self.type, True,
+                f"no_stats — permissive pass (coverage={coverage_n}/{coverage_total})",
+            )
 
         wr = sum(wr_vals) / len(wr_vals) if wr_vals else None
         sh = sum(sh_vals) / len(sh_vals) if sh_vals else None

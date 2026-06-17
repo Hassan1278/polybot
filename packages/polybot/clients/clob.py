@@ -15,6 +15,35 @@ from polybot.logging import get_logger
 
 log = get_logger(__name__)
 
+# Module-level sync engine cache. We need ONE sync SQLAlchemy engine
+# across the entire process for the wallet-credential decrypt path;
+# previously each ClobClient signing call created a fresh
+# `create_engine(...)` and never disposed it, leaking ~5 pooled
+# connections per call. Postgres's `max_connections` (default 100) would
+# trip after ~20 live signals.
+_SYNC_ENGINE = None
+_SYNC_SESSION_FACTORY = None
+
+
+def _get_sync_session_factory():
+    global _SYNC_ENGINE, _SYNC_SESSION_FACTORY
+    if _SYNC_SESSION_FACTORY is None:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        # The async URL works for sync too (psycopg backend covers both).
+        # NOTE: no `.replace("+psycopg", "+psycopg")` — that was a typo
+        # no-op in the old code.
+        _SYNC_ENGINE = create_engine(
+            settings.database_url,
+            pool_pre_ping=True,
+            pool_size=2,         # tiny — wallet decrypt is rare
+            max_overflow=2,
+            pool_recycle=300,
+        )
+        _SYNC_SESSION_FACTORY = sessionmaker(_SYNC_ENGINE, expire_on_commit=False)
+    return _SYNC_SESSION_FACTORY
+
 
 class ClobClient(HttpClient):
     def __init__(self) -> None:
@@ -163,20 +192,22 @@ class ClobClient(HttpClient):
         py-clob-client SDK is sync, so we're already on a worker thread
         when this is called). Returns None if no active credential exists
         or decryption fails — caller falls back to env.
+
+        The sync engine is process-cached (via `_get_sync_engine`) so each
+        call reuses one pool instead of leaking ~5 connections per call —
+        a previous version created a fresh `create_engine(...)` per
+        invocation and never disposed it, draining Postgres `max_connections`
+        on a high-fill day.
         """
         try:
             from datetime import datetime, timezone
 
-            from sqlalchemy import create_engine, select
-            from sqlalchemy.orm import sessionmaker
+            from sqlalchemy import select
 
             from polybot.crypto import decrypt
             from polybot.models.wallet_credential import WalletCredential
 
-            # Convert async URL to sync (psycopg works for both)
-            sync_url = settings.database_url.replace("+psycopg", "+psycopg")
-            engine = create_engine(sync_url, pool_pre_ping=True)
-            session_local = sessionmaker(engine, expire_on_commit=False)
+            session_local = _get_sync_session_factory()
             with session_local() as s:
                 row = s.execute(
                     select(WalletCredential)

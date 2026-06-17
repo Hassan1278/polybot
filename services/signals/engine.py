@@ -127,6 +127,22 @@ async def process_candidate(cand: dict, *, target_size_usdc: float | None = None
         sid = sig.id
 
     if gate_pass_hard:
+        # Arm the per-market cooldown ONLY now that we know the signal
+        # actually fires. Previously the cooldown gate wrote the key
+        # during evaluate() — if a later hard or soft gate downgraded
+        # the cluster, the cooldown blocked legitimate follow-ups for
+        # 30 min while no signal actually existed.
+        cd_seconds = ctx.extra.get("cooldown_seconds")
+        if cd_seconds:
+            from services.signals.conditions.cooldown import KEY as _CD_KEY
+            try:
+                await redis.set(
+                    _CD_KEY.format(mid=cand["market_id"]),
+                    "1", ex=int(cd_seconds),
+                )
+            except Exception:  # noqa: BLE001
+                log.warning("cooldown_arm_failed", market=cand["market_id"])
+
         signal_payload = {
             "id": sid,
             "market_id": cand["market_id"],
