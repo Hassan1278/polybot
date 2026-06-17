@@ -16,7 +16,7 @@
 
 import { useState } from "react";
 import useSWR from "swr";
-import { API } from "@/lib/api";
+import { API, fetcher } from "@/lib/api";
 import { adminApi, getAdminToken } from "@/lib/admin";
 import { useAuthStatus } from "@/lib/auth-status";
 import { getSessionToken } from "@/lib/wallet";
@@ -25,6 +25,15 @@ import ConfirmModal from "@/components/ConfirmModal";
 type Mode = "paper" | "live";
 
 type ModeResp = { mode: Mode; enabled_modes?: Mode[] };
+
+type PnlPoint = { ts: string; equity: number; realized: number; unrealized: number; open: number };
+
+type WalletRow = {
+  id: number;
+  label: string;
+  address: string;
+  is_active: boolean;
+};
 
 type RiskShape = {
   max_position_usdc?: number;
@@ -66,6 +75,21 @@ export default function ModeTab() {
     authed ? "/admin/settings" : null,
     (path: string) => adminApi.get(path) as Promise<SettingsResp>,
     { refreshInterval: 15000 },
+  );
+  // Paper-mode equity snapshot for the live-readiness card. Same endpoint
+  // the home page uses; gated on auth so we don't 401-loop while signed out.
+  const paperPnlSwr = useSWR<PnlPoint[]>(
+    authed ? "/pnl?mode=paper&limit=1" : null,
+    fetcher,
+    { refreshInterval: 15000 },
+  );
+  // Bot-wallet roster — drives the "wallet configured?" indicator next to
+  // the LIVE toggle so the operator doesn't flip to live + watch nothing
+  // happen + dig through executor logs to figure out why.
+  const walletsSwr = useSWR<WalletRow[]>(
+    authed ? "/admin/settings/wallet" : null,
+    (path: string) => adminApi.get(path) as Promise<WalletRow[]>,
+    { refreshInterval: 30000 },
   );
 
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -183,9 +207,54 @@ export default function ModeTab() {
 
   const eff = settingsSwr.data?.effective?.risk ?? {};
   const base = settingsSwr.data?.baseline?.risk ?? {};
+  const paperPnl = paperPnlSwr.data?.[0];
+  const wallets = walletsSwr.data ?? [];
+  const activeWallet = wallets.find((w) => w.is_active);
+  const walletConfigured = !!activeWallet;
 
   return (
     <div className="space-y-4">
+      {/* Pre-flight readiness card — what you need to know BEFORE flipping LIVE */}
+      <div className="card space-y-3">
+        <h3 className="text-sm k">Live-readiness snapshot</h3>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <ReadinessStat
+            label="Paper equity"
+            value={paperPnl ? `$${paperPnl.equity.toFixed(2)}` : "loading…"}
+            sub={paperPnl
+              ? `realized ${fmtSigned(paperPnl.realized)} · unreal ${fmtSigned(paperPnl.unrealized)}`
+              : ""}
+          />
+          <ReadinessStat
+            label="Open positions"
+            value={paperPnl ? String(paperPnl.open) : "—"}
+            sub="paper-mode count"
+          />
+          <ReadinessStat
+            label="Bot wallet"
+            value={walletConfigured ? "configured" : "not set up"}
+            sub={walletConfigured
+              ? `${activeWallet?.label} (${activeWallet?.address.slice(0, 6)}…${activeWallet?.address.slice(-4)})`
+              : "Add one in Wallet tab before enabling LIVE"}
+            tone={walletConfigured ? "ok" : "warn"}
+          />
+          <ReadinessStat
+            label="Live currently"
+            value={liveOn ? "ON" : "OFF"}
+            tone={liveOn ? "danger" : "neutral"}
+            sub={liveOn ? "real USDC at risk" : "no live exposure"}
+          />
+        </div>
+        {!walletConfigured && (
+          <div className="text-xs text-warn border border-warn/30 bg-warn/10 rounded px-2 py-1">
+            ⚠ No bot wallet configured. Enabling LIVE will let signals through to
+            the executor, but every order will be rejected with{" "}
+            <code>live_mode_no_creds</code> until you add a signing wallet in the{" "}
+            <span className="font-mono">Wallet</span> tab.
+          </div>
+        )}
+      </div>
+
       <div className="card space-y-3">
         <div className="flex items-center justify-between">
           <h2 className="text-lg font-bold">Active modes</h2>
@@ -218,7 +287,11 @@ export default function ModeTab() {
             busy={busy}
             onToggle={toggleLive}
             tone="danger"
-            description="EIP-712 signed orders posted to Polymarket. Real USDC."
+            description={
+              walletConfigured
+                ? "EIP-712 signed orders posted to Polymarket. Real USDC."
+                : "⚠ No bot wallet — orders will all reject until one is added."
+            }
           />
         </div>
 
@@ -324,6 +397,34 @@ function ModeChip({
       </button>
     </div>
   );
+}
+
+function ReadinessStat({
+  label, value, sub, tone = "neutral",
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  tone?: "ok" | "warn" | "danger" | "neutral";
+}) {
+  const vColor =
+    tone === "ok" ? "text-accent" :
+    tone === "warn" ? "text-warn" :
+    tone === "danger" ? "text-danger" :
+    "";
+  return (
+    <div className="bg-bg2/40 border border-white/5 rounded p-2">
+      <div className="k">{label}</div>
+      <div className={`v ${vColor}`}>{value}</div>
+      {sub && <div className="text-[10px] text-muted mt-1">{sub}</div>}
+    </div>
+  );
+}
+
+function fmtSigned(n: number | undefined | null): string {
+  if (n == null || Number.isNaN(n)) return "—";
+  const sign = n >= 0 ? "+" : "-";
+  return `${sign}$${Math.abs(n).toFixed(2)}`;
 }
 
 function RiskStat({

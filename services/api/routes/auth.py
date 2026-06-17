@@ -192,17 +192,27 @@ async def verify_signature(body: VerifyBody) -> dict[str, Any]:
     if recovered.lower() != claimed:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "signature does not match address")
 
-    # 4. Allowlist
+    # 4. Allowlist enforcement — security-critical.
+    #
+    # Default: SIWE login REQUIRES an entry in ADMIN_WALLET_ADDRESSES even
+    # in paper mode. A previous "paper-only convenience" path let ANY
+    # connected wallet authenticate when the allowlist was empty — that's
+    # remote-control-of-the-bot for anyone who can reach the dashboard,
+    # which is exactly the threat model SIWE is meant to defeat.
+    #
+    # Escape hatch for true single-laptop dev: set
+    # SIWE_DEV_MODE_ALLOW_ANY=true in .env. Loud warning logs on every
+    # login so the operator can't forget the door is open.
     if not _ALLOWLIST:
-        # No allowlist configured — paper-only convenience. Block in live
-        # mode (the user must add their address before going live).
-        from polybot.config import settings as cfg
-        if cfg.trading_mode == "live":
+        dev_mode = os.environ.get("SIWE_DEV_MODE_ALLOW_ANY", "").strip().lower() == "true"
+        if not dev_mode:
             raise HTTPException(
                 status.HTTP_403_FORBIDDEN,
-                "ADMIN_WALLET_ADDRESSES env var is empty — set it before live mode",
+                "ADMIN_WALLET_ADDRESSES is empty — add your wallet address to .env "
+                "(or set SIWE_DEV_MODE_ALLOW_ANY=true for local dev only). "
+                "Otherwise anyone on the network could sign in.",
             )
-        log.warning("siwe_allowlist_empty_dev_mode_only", address=claimed)
+        log.warning("siwe_dev_mode_login_any_wallet_accepted", address=claimed)
     elif "*" not in _ALLOWLIST and claimed not in _ALLOWLIST:
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
