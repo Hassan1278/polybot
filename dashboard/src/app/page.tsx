@@ -4,10 +4,11 @@ import { fetcher, postAdmin, API } from "@/lib/api";
 import { ResponsiveLine } from "@nivo/line";
 import { useState, useEffect } from "react";
 import type React from "react";
-import { ADMIN_TOKEN_KEY, getAdminToken, setAdminToken, clearAdminToken } from "@/lib/admin";
+import { ADMIN_TOKEN_KEY, getAdminToken, adminApi, setAdminToken, clearAdminToken } from "@/lib/admin";
 import { getSessionToken } from "@/lib/wallet";
 import { useAuthStatus } from "@/lib/auth-status";
 import ConnectWallet from "@/components/ConnectWallet";
+import ConfirmModal from "@/components/ConfirmModal";
 
 type Pnl = { ts: string; equity: number; realized: number; unrealized: number; open: number };
 type Health = { ok: boolean; mode: string; can_sign: boolean; kill_switch: string | null };
@@ -91,9 +92,14 @@ export default function Home() {
       <section className="card">
         <div className="flex items-baseline justify-between mb-2">
           <h2 className="text-sm k">Open positions</h2>
-          <span className="text-xs text-muted">
-            {open.length} open · live mark every 15s
-          </span>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-muted">
+              {open.length} open · live mark every 15s
+            </span>
+            {authed && open.length > 0 && (
+              <CloseAllButton onDone={() => { /* SWR auto-refreshes */ }} />
+            )}
+          </div>
         </div>
         {open.length === 0 ? (
           <div className="text-xs text-muted py-2">
@@ -114,28 +120,12 @@ export default function Home() {
                   <th className="text-right p-2">M-to-M</th>
                   <th className="text-right p-2">%</th>
                   <th className="text-left p-2">Resolves</th>
+                  <th className="text-right p-2"></th>
                 </tr>
               </thead>
               <tbody>
                 {open.map(p => (
-                  <tr key={`${p.market_id}-${p.outcome}`} className="border-t border-white/5">
-                    <td className="p-2 max-w-[280px] truncate" title={p.question ?? p.market_id}>
-                      {p.question ?? <span className="font-mono text-xs">{p.market_id.slice(0, 14)}…</span>}
-                    </td>
-                    <td className="p-2 text-xs">{p.category ?? "—"}</td>
-                    <td className="p-2">{p.outcome}</td>
-                    <td className="p-2 text-right">{p.size_shares.toFixed(0)}</td>
-                    <td className="p-2 text-right">{p.avg_price.toFixed(3)}</td>
-                    <td className="p-2 text-right">{p.mark_price != null ? p.mark_price.toFixed(3) : "—"}</td>
-                    <td className="p-2 text-right">${p.cost_usdc.toFixed(2)}</td>
-                    <td className={`p-2 text-right ${pnlColor(p.mark_to_market_usdc)}`}>
-                      {p.mark_to_market_usdc != null ? `$${p.mark_to_market_usdc.toFixed(2)}` : "—"}
-                    </td>
-                    <td className={`p-2 text-right ${pnlColor(p.pct_change)}`}>
-                      {p.pct_change != null ? `${(p.pct_change * 100).toFixed(1)}%` : "—"}
-                    </td>
-                    <td className="p-2 text-xs whitespace-nowrap">{resolveStatus(p)}</td>
-                  </tr>
+                  <PositionRow key={`${p.market_id}-${p.outcome}`} p={p} authed={authed} />
                 ))}
               </tbody>
             </table>
@@ -265,6 +255,124 @@ export default function Home() {
 
 function Stat({ k, v }: { k: string; v: string }) {
   return <div className="card"><div className="k">{k}</div><div className="v">{v}</div></div>;
+}
+
+function PositionRow({ p, authed }: { p: Position; authed: boolean }) {
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState<"ok" | "err" | null>(null);
+  const [errMsg, setErrMsg] = useState<string | null>(null);
+
+  const onClose = async () => {
+    if (!confirm(`Close ${p.outcome} on ${p.question?.slice(0, 60) ?? p.market_id.slice(0, 14)}? Sells at best bid.`)) return;
+    setBusy(true); setErrMsg(null);
+    try {
+      const r = await adminApi.post("/positions/close", {
+        market_id: p.market_id, outcome: p.outcome, fraction: 1.0,
+      }) as { status?: string; error?: string };
+      if (r?.status === "filled" || r?.status === "submitted" || r?.status === "partial") {
+        setDone("ok");
+      } else {
+        setDone("err");
+        setErrMsg(r?.error ?? r?.status ?? "rejected");
+      }
+    } catch (e) {
+      setDone("err");
+      setErrMsg(String(e instanceof Error ? e.message : e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <tr className="border-t border-white/5">
+      <td className="p-2 max-w-[280px] truncate" title={p.question ?? p.market_id}>
+        {p.question ?? <span className="font-mono text-xs">{p.market_id.slice(0, 14)}…</span>}
+      </td>
+      <td className="p-2 text-xs">{p.category ?? "—"}</td>
+      <td className="p-2">{p.outcome}</td>
+      <td className="p-2 text-right">{p.size_shares.toFixed(0)}</td>
+      <td className="p-2 text-right">{p.avg_price.toFixed(3)}</td>
+      <td className="p-2 text-right">{p.mark_price != null ? p.mark_price.toFixed(3) : "—"}</td>
+      <td className="p-2 text-right">${p.cost_usdc.toFixed(2)}</td>
+      <td className={`p-2 text-right ${pnlColor(p.mark_to_market_usdc)}`}>
+        {p.mark_to_market_usdc != null ? `$${p.mark_to_market_usdc.toFixed(2)}` : "—"}
+      </td>
+      <td className={`p-2 text-right ${pnlColor(p.pct_change)}`}>
+        {p.pct_change != null ? `${(p.pct_change * 100).toFixed(1)}%` : "—"}
+      </td>
+      <td className="p-2 text-xs whitespace-nowrap">{resolveStatus(p)}</td>
+      <td className="p-2 text-right">
+        {authed && (
+          done === "ok" ? (
+            <span className="text-accent text-xs">closed</span>
+          ) : (
+            <button
+              onClick={onClose}
+              disabled={busy}
+              className="text-xs px-2 py-1 rounded border border-danger/40 text-danger hover:bg-danger/10 disabled:opacity-40"
+              title={errMsg ?? "Sell at best bid (paper mode)"}
+            >
+              {busy ? "…" : done === "err" ? "retry" : "close"}
+            </button>
+          )
+        )}
+      </td>
+    </tr>
+  );
+}
+
+function CloseAllButton({ onDone }: { onDone: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<{ closed_n?: number; rejected_n?: number; total?: number; summary?: string } | null>(null);
+
+  const onConfirm = async () => {
+    setBusy(true);
+    try {
+      const r = await adminApi.post("/positions/close-all", {}) as any;
+      setResult(r);
+      onDone();
+    } catch (e) {
+      setResult({ summary: `error: ${String(e instanceof Error ? e.message : e)}` });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <button
+        onClick={() => { setResult(null); setOpen(true); }}
+        className="text-xs px-3 py-1 rounded border border-danger/50 text-danger hover:bg-danger/10"
+        title="Emergency: sell every open paper position at best bid"
+      >
+        Close all
+      </button>
+      <ConfirmModal
+        open={open}
+        title="EMERGENCY — Close all open positions"
+        body={
+          "Sells EVERY open paper position at best bid right now.\n\n" +
+          "Partial closes are NOT rolled back if one position fails. The\n" +
+          "kill switch is NOT toggled — new signals can still arrive and\n" +
+          "open new positions until you also activate it.\n\n" +
+          "Type CLOSE-ALL to confirm."
+        }
+        confirmText="CLOSE-ALL"
+        busy={busy}
+        onCancel={() => setOpen(false)}
+        onConfirm={async () => {
+          await onConfirm();
+          setOpen(false);
+        }}
+      />
+      {result && (
+        <span className="text-xs text-muted">
+          {result.summary ?? `${result.closed_n ?? 0}/${result.total ?? 0} closed${result.rejected_n ? `, ${result.rejected_n} failed` : ""}`}
+        </span>
+      )}
+    </>
+  );
 }
 
 function pnlColor(n: number | null | undefined): string {

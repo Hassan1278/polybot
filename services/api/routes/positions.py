@@ -15,15 +15,20 @@ import asyncio
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from polybot import alerts
 from polybot.clients import ClobClient
-from polybot.db import get_session
+from polybot.db import get_session, session_scope
 from polybot.logging import get_logger
 from polybot.market_resolver import token_for_outcome
-from polybot.models import Market, Position
+from polybot.models import AuditLog, Market, Position
+from polybot.redis_bus import publish
+from services.api.deps import require_admin
+from services.executor.paper import close_position as paper_close_position
 
 log = get_logger(__name__)
 router = APIRouter()
@@ -146,3 +151,126 @@ async def list_positions(
             "updated_at": r.updated_at.isoformat() if isinstance(r.updated_at, datetime) else None,
         })
     return out
+
+
+# ---------------- Manual close endpoints ------------------------------------
+#
+# Paper-mode close: walks the live orderbook bids and sells at the best
+# available prices. Realized PnL credited immediately.
+#
+# Live-mode close: NOT IMPLEMENTED YET — would need to place a real SELL
+# order via place_live(side="SELL"). For now we return 501 so the operator
+# isn't tricked into thinking they liquidated something they didn't.
+
+
+class ClosePositionBody(BaseModel):
+    market_id: str = Field(min_length=10)
+    outcome: str = Field(min_length=1)
+    fraction: float = Field(default=1.0, ge=0.01, le=1.0)
+
+
+@router.post("/close", dependencies=[Depends(require_admin)])
+async def close_one_position(
+    body: ClosePositionBody = Body(...),
+) -> dict[str, Any]:
+    """Close a single open position immediately at best bid (paper only).
+
+    `fraction` lets the operator partial-close (e.g. 0.5 = sell half).
+    Defaults to full close.
+
+    Returns the resulting Fill record or a rejection reason. Audited.
+    """
+    result = await paper_close_position(
+        market_id=body.market_id,
+        outcome=body.outcome,
+        fraction=body.fraction,
+    )
+    # Audit + publish so the dashboard sees it on the fill stream.
+    try:
+        async with session_scope() as s:
+            s.add(AuditLog(
+                actor="manual_close",
+                event="position_close",
+                payload={
+                    "market_id": body.market_id,
+                    "outcome": body.outcome,
+                    "fraction": body.fraction,
+                    "result_status": result.get("status") if isinstance(result, dict) else None,
+                },
+            ))
+        await publish("fill:new", {"signal_id": None, "result": result, "mode": "paper"})
+    except Exception:  # noqa: BLE001
+        log.exception("close_one_position_side_effects_failed")
+    return result
+
+
+@router.post("/close-all", dependencies=[Depends(require_admin)])
+async def close_all_positions() -> dict[str, Any]:
+    """EMERGENCY: close EVERY open paper position at best bid.
+
+    Walks all positions with size_shares > 0 in serial (so we don't blow up
+    the CLOB rate limit). Returns a summary of per-position results.
+    Audit-logged with the full list so post-incident reconstruction is
+    possible. Use with care — partial closes are NOT rolled back if one
+    market mid-way fails.
+    """
+    async with session_scope() as s:
+        rows = (await s.execute(
+            select(Position.market_id, Position.outcome, Position.size_shares)
+            .where(Position.size_shares > 0)
+        )).all()
+
+    if not rows:
+        return {"closed": [], "rejected": [], "total": 0,
+                "summary": "no open positions"}
+
+    closed: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for r in rows:
+        try:
+            result = await paper_close_position(
+                market_id=r.market_id, outcome=r.outcome, fraction=1.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("close_all_iter_failed",
+                          market=r.market_id, outcome=r.outcome)
+            rejected.append({"market_id": r.market_id, "outcome": r.outcome,
+                             "error": f"{type(exc).__name__}:{exc}"})
+            continue
+        if isinstance(result, dict) and result.get("status") in (
+            "filled", "submitted", "partial"
+        ):
+            closed.append({"market_id": r.market_id, "outcome": r.outcome,
+                           "result": result})
+        else:
+            rejected.append({"market_id": r.market_id, "outcome": r.outcome,
+                             "result": result})
+
+    summary = {"closed": closed, "rejected": rejected,
+               "total": len(rows),
+               "closed_n": len(closed), "rejected_n": len(rejected)}
+
+    try:
+        async with session_scope() as s:
+            s.add(AuditLog(
+                actor="emergency_close_all",
+                event="close_all_positions",
+                payload={
+                    "total": len(rows),
+                    "closed": len(closed),
+                    "rejected": len(rejected),
+                    "rejected_markets": [
+                        {"market_id": r["market_id"], "outcome": r["outcome"]}
+                        for r in rejected
+                    ][:50],  # cap to keep audit row small
+                },
+            ))
+        await alerts.notify(
+            "warn",
+            "Emergency close-all triggered",
+            f"{len(closed)} closed, {len(rejected)} rejected of {len(rows)} positions",
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("close_all_audit_failed")
+
+    return summary
