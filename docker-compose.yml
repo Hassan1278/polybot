@@ -61,7 +61,13 @@ services:
   api:
     <<: *python-base
     container_name: polybot-api
-    command: uvicorn services.api.main:app --host 0.0.0.0 --port 8000 --reload
+    # Run migrations on every start (idempotent — alembic only applies
+    # pending revisions) so a fresh `docker compose up` brings up a
+    # working DB schema without a manual `alembic upgrade head` step.
+    # Other Python services depend on `api: service_healthy` (the
+    # dashboard already does — extend the same dep to ingest/signals/
+    # executor if you see them race-querying empty tables at boot).
+    command: sh -c "alembic -c alembic.ini upgrade head && uvicorn services.api.main:app --host 0.0.0.0 --port 8000 --reload"
     ports:
       - "8000:8000"
     healthcheck:
