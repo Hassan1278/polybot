@@ -42,23 +42,12 @@ async def handle(sig: dict) -> None:
     size_usdc = float(sig.get("size_usdc", settings.max_position_usdc))
     score = float(sig.get("score", 0.0))
 
-    # B14 follow-up: idempotency check. Multiple delivery paths can hand the
-    # same signal_id to the executor — Redis pub/sub re-delivery during a
-    # subscriber crash, manual replay via redis-cli, or a future Streams
-    # XAUTOCLAIM. Without this check, the same signal could write multiple
-    # Fill rows, double-counting the position. The DB also enforces this
-    # via the partial UNIQUE index `uq_fills_signal_id` (migration 0004).
-    async with session_scope() as s:
-        existing = (await s.execute(
-            select(Fill.id).where(Fill.signal_id == sid)
-        )).scalar()
-    if existing is not None:
-        log.info(
-            "executor_dedup_skip",
-            signal=sid, existing_fill=existing,
-            reason="signal already processed",
-        )
-        return
+    # Idempotency pre-check moved INSIDE the per-mode for-loop below.
+    # Parallel mode (paper + live) needs to skip ONLY modes that have
+    # already been filled, not the entire signal — otherwise a paper-row
+    # written on a prior delivery blocks the live retry forever. Migration
+    # 0008 enforces the same constraint at the DB layer with
+    # uq_fills_signal_id_mode(signal_id, mode).
 
     async with session_scope() as s:
         row = (await s.execute(
@@ -108,66 +97,91 @@ async def handle(sig: dict) -> None:
 
     from datetime import datetime, timezone
     results: dict[str, dict] = {}
-    for exec_mode in sorted(modes):  # deterministic order: live first only if alphabetical wins
+    for exec_mode in sorted(modes):
+        # Per-mode try/except: a live failure must NOT propagate up and
+        # DLQ the paper-success. We log + continue to the next mode.
         try:
-            await preflight(mode=exec_mode, market_id=market_id,
-                            category=category, side=side, size_usdc=size_usdc, score=score)
-        except RiskRejection as rej:
-            log.warning("risk_rejected", signal=sid, mode=exec_mode, reason=str(rej))
+            # MODE-SCOPED idempotency: skip ONLY this mode's existing fill,
+            # not the entire signal. Without this check, a redelivered
+            # signal with paper already filled would still try to insert
+            # a second paper row (IntegrityError on the composite UNIQUE
+            # uq_fills_signal_id_mode from migration 0008).
             async with session_scope() as s:
-                s.add(AuditLog(actor="executor", event="risk_rejected",
-                               payload={"signal_id": sid, "mode": exec_mode, "reason": str(rej)}))
-            try:
-                await alerts.risk_rejected_alert(reason=f"{exec_mode}:{rej}", signal_id=sid)
-            except Exception:  # noqa: BLE001
-                log.exception("alerts_risk_rejected_failed")
-            continue
-
-        if exec_mode == "paper":
-            result = await simulate_fill(
-                signal_id=sid, market_id=market_id, outcome=outcome,
-                side=side, size_usdc=size_usdc,
-            )
-        else:  # live
-            if not settings.can_sign:
-                # No signing credential — record a rejected Fill so the
-                # dashboard surfaces the gap. Paper still runs in parallel.
-                log.error("live_mode_no_creds", signal=sid)
-                async with session_scope() as s:
-                    s.add(Fill(
-                        signal_id=sid,
-                        ts=datetime.now(tz=timezone.utc),
-                        mode="live",
-                        market_id=market_id,
-                        outcome=outcome,
-                        side=side,
-                        size_shares=0.0, price=0.0, notional_usdc=0.0, fee_usdc=0.0,
-                        status="rejected", error="live_mode_no_creds",
-                    ))
-                try:
-                    await alerts.notify(
-                        "critical",
-                        "Live signal dropped: no signing credential",
-                        f"signal_id={sid} market={market_id[:18]} — add a wallet "
-                        "via /admin/settings/wallet or set POLYMARKET_PRIVATE_KEY",
+                existing = (await s.execute(
+                    select(Fill.id).where(
+                        Fill.signal_id == sid,
+                        Fill.mode == exec_mode,
                     )
-                except Exception:  # noqa: BLE001
-                    log.exception("alerts_no_creds_failed")
-                results[exec_mode] = {"status": "rejected", "error": "live_mode_no_creds"}
+                )).scalar()
+            if existing is not None:
+                log.info("executor_dedup_skip_mode",
+                         signal=sid, mode=exec_mode, existing_fill=existing)
                 continue
-            result = await place_live(
-                signal_id=sid, market_id=market_id, outcome=outcome,
-                side=side, size_usdc=size_usdc,
-            )
 
-        results[exec_mode] = result if isinstance(result, dict) else {"status": "ok"}
-        await publish("fill:new", {"signal_id": sid, "result": result, "mode": exec_mode})
-
-        if isinstance(result, dict) and result.get("status") in ("filled", "submitted", "partial"):
             try:
-                await alerts.fill_alert(result)
-            except Exception:  # noqa: BLE001
-                log.exception("alerts_fill_failed")
+                await preflight(mode=exec_mode, market_id=market_id,
+                                category=category, side=side, size_usdc=size_usdc, score=score)
+            except RiskRejection as rej:
+                log.warning("risk_rejected", signal=sid, mode=exec_mode, reason=str(rej))
+                async with session_scope() as s:
+                    s.add(AuditLog(actor="executor", event="risk_rejected",
+                                   payload={"signal_id": sid, "mode": exec_mode, "reason": str(rej)}))
+                try:
+                    await alerts.risk_rejected_alert(reason=f"{exec_mode}:{rej}", signal_id=sid)
+                except Exception:  # noqa: BLE001
+                    log.exception("alerts_risk_rejected_failed")
+                continue
+
+            if exec_mode == "paper":
+                result = await simulate_fill(
+                    signal_id=sid, market_id=market_id, outcome=outcome,
+                    side=side, size_usdc=size_usdc,
+                )
+            else:  # live
+                if not settings.can_sign:
+                    # No signing credential — record a rejected Fill so the
+                    # dashboard surfaces the gap. Paper still runs in parallel.
+                    log.error("live_mode_no_creds", signal=sid)
+                    async with session_scope() as s:
+                        s.add(Fill(
+                            signal_id=sid,
+                            ts=datetime.now(tz=timezone.utc),
+                            mode="live",
+                            market_id=market_id,
+                            outcome=outcome,
+                            side=side,
+                            size_shares=0.0, price=0.0, notional_usdc=0.0, fee_usdc=0.0,
+                            status="rejected", error="live_mode_no_creds",
+                        ))
+                    try:
+                        await alerts.notify(
+                            "critical",
+                            "Live signal dropped: no signing credential",
+                            f"signal_id={sid} market={market_id[:18]} — add a wallet "
+                            "via /admin/settings/wallet or set POLYMARKET_PRIVATE_KEY",
+                        )
+                    except Exception:  # noqa: BLE001
+                        log.exception("alerts_no_creds_failed")
+                    results[exec_mode] = {"status": "rejected", "error": "live_mode_no_creds"}
+                    continue
+                result = await place_live(
+                    signal_id=sid, market_id=market_id, outcome=outcome,
+                    side=side, size_usdc=size_usdc,
+                )
+
+            results[exec_mode] = result if isinstance(result, dict) else {"status": "ok"}
+            await publish("fill:new", {"signal_id": sid, "result": result, "mode": exec_mode})
+
+            if isinstance(result, dict) and result.get("status") in ("filled", "submitted", "partial"):
+                try:
+                    await alerts.fill_alert(result)
+                except Exception:  # noqa: BLE001
+                    log.exception("alerts_fill_failed")
+        except Exception as exc:  # noqa: BLE001
+            # Isolate per-mode failures: one mode crashing should not
+            # block the others or DLQ the whole signal.
+            log.exception("executor_mode_failed", signal=sid, mode=exec_mode, err=str(exc))
+            results[exec_mode] = {"status": "rejected", "error": f"{type(exc).__name__}:{exc}"}
 
 
 _STREAM = "signal:new"

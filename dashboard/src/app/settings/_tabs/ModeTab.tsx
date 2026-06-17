@@ -105,7 +105,7 @@ export default function ModeTab() {
       if (sessionTok) headers["X-Session-Token"] = sessionTok;
       if (adminTok) headers["X-Admin-Token"] = adminTok;
       if (liveConfirm) headers["X-Live-Confirm"] = liveConfirm;
-      const r = await fetch(`${API}/admin/settings/mode/enabled/`, {
+      const r = await fetch(`${API}/admin/settings/mode/enabled`, {
         method: "PATCH",
         headers,
         body: JSON.stringify(patch),
@@ -160,7 +160,7 @@ export default function ModeTab() {
       let tok = confirmToken.trim();
       if (!tok) {
         try {
-          const challenge = await adminApi.get("/admin/settings/mode/live-challenge/") as { confirm_token: string };
+          const challenge = await adminApi.get("/admin/settings/mode/live-challenge") as { confirm_token: string };
           tok = challenge?.confirm_token ?? "";
         } catch (e) {
           setErr(`failed to fetch live challenge: ${e instanceof Error ? e.message : String(e)}`);

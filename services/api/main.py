@@ -41,12 +41,15 @@ app = FastAPI(
     title="Polybot API",
     version="0.1.0",
     lifespan=lifespan,
-    # Keep FastAPI's default 307 redirect for / vs /foo variants. The
-    # dashboard's Next.js is configured with `trailingSlash: true` so all
-    # browser requests already use the SLASHED form (which matches the
-    # routes' registered shape), so the redirect path is never hit from
-    # the browser. Curl/CLI users hitting the no-slash form still get a
-    # 307 redirect rather than a 404.
+    # FastAPI's default redirect_slashes=True is kept. Most admin/settings
+    # routes are now registered WITHOUT trailing slash (e.g.
+    # `@router.get("")`) so the dashboard's slashless fetches land
+    # directly. A curl/CLI user who appends `/` to a slashless route
+    # still gets a 307 redirect rather than a 404.
+    # Next.js (dashboard/next.config.js) keeps `trailingSlash` at the
+    # default (false) — an earlier attempt to set it true leaked the
+    # internal `http://api:8000/...` Location header through the
+    # rewrite to the browser, creating a broken redirect chain.
 )
 
 # CORS — restrict to known origins. Wildcard "*" combined with

@@ -82,7 +82,14 @@ async def enabled_modes() -> set[str]:
                 if cleaned:
                     return cleaned
         except json.JSONDecodeError:
-            log.warning("runtime_config_bad_enabled_modes", raw=raw)
+            log.warning("runtime_config_bad_enabled_modes_repairing", raw=raw)
+            # Self-repair: a corrupted JSON value would otherwise wedge
+            # the system in legacy mode forever. Delete + fall through
+            # to the legacy derivation so a sane default is re-derived.
+            try:
+                await _redis().delete(_MODES_SET_KEY)
+            except Exception:  # noqa: BLE001
+                pass
     # Backward compat: derive from the single-mode key.
     legacy = await current_mode()
     return {legacy}
@@ -143,19 +150,27 @@ async def set_mode(mode: str, *, actor: str = "admin") -> None:
     """Legacy single-mode switch.
 
     Kept for backward compat with the existing /admin/settings/mode
-    endpoint. Also updates `enabled_modes` to {mode} so the two stay
-    coherent when an operator uses the legacy endpoint.
+    endpoint. ALSO MERGES into `enabled_modes` rather than replacing it,
+    so an operator who hits POST /mode {paper} no longer silently
+    clobbers a running parallel {paper, live} configuration. The
+    PARALLEL set is canonical now — this just adds/keeps the requested
+    mode on. To DISABLE a mode, use PATCH /mode/enabled.
     """
     if mode not in ("paper", "live"):
         raise ValueError(f"bad mode: {mode!r}")
     old = await current_mode()
     await _redis().set(_MODE_KEY, mode)
-    # Coherence: legacy endpoint should also reset the parallel set so
-    # operators don't end up with mode="paper" + enabled_modes={"paper","live"}
-    # which would silently keep live running after a "switch to paper".
-    await _redis().set(_MODES_SET_KEY, json.dumps([mode]))
-    await _audit("mode_switched", {"old": old, "new": mode}, actor=actor)
-    log.info("runtime_config_mode_changed", old=old, new=mode, actor=actor)
+    # Merge — don't replace — so legacy callers don't drop a running
+    # live shadow. The PATCH /mode/enabled endpoint is the explicit
+    # way to turn something off.
+    current_set = await enabled_modes()
+    merged = current_set | {mode}
+    await _redis().set(_MODES_SET_KEY, json.dumps(sorted(merged)))
+    await _audit("mode_switched",
+                 {"old": old, "new": mode, "merged_enabled": sorted(merged)},
+                 actor=actor)
+    log.info("runtime_config_mode_changed", old=old, new=mode,
+             enabled=sorted(merged), actor=actor)
 
 
 async def get_overrides(scope: str, mode: str | None = None) -> dict[str, Any]:
