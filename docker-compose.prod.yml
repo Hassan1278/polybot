@@ -32,7 +32,14 @@ services:
           cpus: "2.0"
           memory: 1G
 
+  # ingest/signals/executor wait for `api: service_healthy` so they
+  # don't crash-loop with UndefinedTable errors during the api's
+  # initial `alembic upgrade head` on a fresh deploy. (They already
+  # inherit postgres + redis health waits from the python-base anchor
+  # in docker-compose.yml — compose merges depends_on additively.)
   ingest:
+    depends_on:
+      api: { condition: service_healthy }
     volumes: []
     restart: always
     deploy:
@@ -42,6 +49,8 @@ services:
           memory: 512M
 
   signals:
+    depends_on:
+      api: { condition: service_healthy }
     volumes: []
     restart: always
     deploy:
@@ -51,6 +60,8 @@ services:
           memory: 768M
 
   executor:
+    depends_on:
+      api: { condition: service_healthy }
     volumes: []
     restart: always
     deploy:

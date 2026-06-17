@@ -15,21 +15,35 @@ import type { NextRequest } from "next/server";
  *    React's auto-escaping.
  *  - frame-ancestors 'none' = no clickjacking (also covered by X-Frame-Options).
  */
-export function middleware(_request: NextRequest) {
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-  const wsUrl = apiUrl.replace(/^http/, "ws");
+export function middleware(request: NextRequest) {
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "/api";
+  // CSP connect-src tokens are URLs (http://host:port) or 'self', not
+  // path-only strings like "/api" — Chrome silently drops invalid
+  // tokens, breaking the WebSocket allowlist. So:
+  //   - when apiUrl is "/api" (same-origin proxy), 'self' already
+  //     covers /api/* fetches; we derive the WS host from the request
+  //   - when apiUrl is an absolute URL, we keep it and derive ws/wss
+  //     forms for the WebSocket
+  // WebSocket always hits the api directly on :8000 (Next rewrites
+  // don't proxy WS reliably), so the per-request `host` header gives
+  // us the right hostname for both IP and domain deploys.
+  const httpExtras: string[] = [];
+  const wsExtras: string[] = [];
+  if (apiUrl.startsWith("http")) {
+    httpExtras.push(apiUrl);
+    const ws = apiUrl.replace(/^http/, "ws");
+    wsExtras.push(ws, ws.replace(/^ws:/, "wss:"));
+  }
+  const hostHeader = request.headers.get("host") || "";
+  const hostname = hostHeader.split(":")[0];
+  if (hostname) {
+    wsExtras.push(`ws://${hostname}:8000`, `wss://${hostname}:8000`);
+  }
   const response = NextResponse.next();
 
   const csp = [
     "default-src 'self'",
-    // Allow same-origin (covers the new /api/* proxy mode) AND any
-    // configured external API URL (still works when NEXT_PUBLIC_API_URL
-    // is set to a remote host). WS always goes direct to the api host
-    // (Next rewrites don't reliably handle WebSocket).
-    // Allow both ws:// (dev) and wss:// (HTTPS prod). Mixed content blocks
-    // ws:// on https pages, so the WS scheme is upgraded to wss in api.ts
-    // and the policy must permit it.
-    `connect-src 'self' ${apiUrl} ${wsUrl} ${wsUrl.replace(/^ws:/, "wss:")} ws://localhost:8000 ws://127.0.0.1:8000 wss://localhost:8000`,
+    `connect-src 'self' ${[...httpExtras, ...wsExtras].join(" ")}`,
     "img-src 'self' data:",
     // 'unsafe-eval' added back ONLY for ethers.js — the wallet sign-in
     // library uses dynamic code evaluation for BigInt math on browsers
