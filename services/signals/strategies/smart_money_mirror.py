@@ -54,18 +54,20 @@ class SmartMoneyMirror(SignalStrategy):
 
         out: list[Candidate] = []
         for c in raw:
-            # cluster_active_wallets returns dicts with at least:
-            #   market_id, outcome, side, score, avg_price, wallets[], notional
+            # cluster_active_wallets emits "correlation_score" (not "score") —
+            # an earlier key-mismatch silently set score=0.0 on every
+            # candidate, which made the correlation_score gate fail every
+            # signal with `score=0.000<0.05`. Read the canonical key.
             try:
                 out.append(Candidate(
                     market_id=c["market_id"],
                     outcome=c.get("outcome", "YES"),
                     side=c["side"],
-                    score=float(c.get("score", 0.0)),
+                    score=float(c.get("correlation_score", c.get("score", 0.0))),
                     avg_price=float(c.get("avg_price", 0.0)),
                     extra={
                         "wallets": c.get("wallets", []),
-                        "notional_usdc": float(c.get("notional", 0.0) or 0.0),
+                        "notional_usdc": float(c.get("notional_usdc", c.get("notional", 0.0)) or 0.0),
                     },
                 ))
             except (KeyError, TypeError, ValueError):

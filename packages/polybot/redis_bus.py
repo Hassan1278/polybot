@@ -64,13 +64,25 @@ async def subscribe(channel: str) -> AsyncIterator[dict[str, Any]]:
     r = client()
     pubsub = r.pubsub()
     await pubsub.subscribe(channel)
-    async for msg in pubsub.listen():
-        if msg["type"] != "message":
-            continue
+    try:
+        async for msg in pubsub.listen():
+            if msg["type"] != "message":
+                continue
+            try:
+                yield json.loads(msg["data"])
+            except json.JSONDecodeError:
+                continue
+    finally:
+        # Without this, each dashboard WS disconnect leaked one subscriber
+        # connection per channel (5 per client × N reconnects).
         try:
-            yield json.loads(msg["data"])
-        except json.JSONDecodeError:
-            continue
+            await pubsub.unsubscribe(channel)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await pubsub.aclose()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ---- Streams (durable, ack/dlq) ---------------------------------------------

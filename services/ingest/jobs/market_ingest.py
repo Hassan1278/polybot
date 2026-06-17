@@ -25,8 +25,11 @@ def _category_from_tags(tags: list[str], mapping: dict[str, list[str]]) -> str |
 
 
 async def run_market_ingest() -> None:
-    from polybot.yaml_config import categories_cfg
-    cats = categories_cfg.get().get("categories", {})
+    # Same fix as leaderboard_scraper: merged_categories includes Redis
+    # overrides so disabling a category via dashboard immediately stops
+    # market ingest for it.
+    from polybot.runtime_config import merged_categories
+    cats = await merged_categories()
     tag_map = {cat: c["tags"] for cat, c in cats.items() if c.get("enabled")}
 
     g = GammaClient()

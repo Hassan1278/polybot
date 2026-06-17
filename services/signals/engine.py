@@ -13,15 +13,21 @@ from polybot.market_resolver import ensure_market
 from polybot.models import AuditLog, Signal
 from polybot.redis_bus import client as redis_client
 from polybot.redis_bus import publish
+from polybot.runtime_config import current_mode, merged_gates, merged_risk
 from polybot.stats import position_size_from_score
-from polybot.yaml_config import gates_cfg, risk_cfg
 from services.signals.conditions import REGISTRY, GateContext
 
 log = get_logger(__name__)
 
 
-def _build_chain():
-    cfg = gates_cfg.get().get("gates", [])
+async def _build_chain():
+    # Use the merged read-path (YAML baseline + Redis overrides) so that
+    # dashboard PATCHes via /admin/settings/gates take effect immediately.
+    # Previously this read yaml_config.gates_cfg directly, which made the
+    # entire override layer a no-op for the gate chain — the bug that
+    # silently kept the bot strict no matter what the operator changed.
+    mode = await current_mode()
+    cfg = (await merged_gates(mode)).get("gates", [])
     chain = []
     for g in cfg:
         cls = REGISTRY.get(g["name"])
@@ -50,16 +56,17 @@ async def process_candidate(cand: dict, *, target_size_usdc: float | None = None
     except Exception as exc:  # noqa: BLE001 — resolver can raise any HTTP error
         log.warning("ensure_market_failed", market=cand["market_id"], err=str(exc))
 
-    chain = _build_chain()
+    chain = await _build_chain()
     redis = redis_client()
     now = time.time()
     results: dict[str, dict] = {}
     score = float(cand.get("correlation_score", 0.0))
     gate_pass_hard = True
 
-    # Caller override wins; otherwise start at the configured base so gates
-    # have a sensible default to inspect, and recompute from final score below.
-    sizing_cfg = (risk_cfg.get() or {}).get("sizing", {}) or {}
+    # Same fix as above: use merged_risk so per-mode + override changes
+    # to base/max/anchor/steepness apply without a restart.
+    mode = await current_mode()
+    sizing_cfg = (await merged_risk(mode) or {}).get("sizing", {}) or {}
     base = float(sizing_cfg.get("base_usdc", 10.0))
     max_size = float(sizing_cfg.get("max_usdc", 50.0))
     anchor = float(sizing_cfg.get("anchor", 0.5))

@@ -326,8 +326,13 @@ async def _attribute_and_persist(
                 source="ws",
             )
             if tx:
+                # Migration 0005 changed the unique index from (tx_hash)
+                # to (tx_hash, ts) for the TimescaleDB hypertable. The
+                # ON CONFLICT must match the composite — single-column
+                # `tx_hash` raises InvalidColumnReference and kills the
+                # batch. Same fix as trade_ingest.py, missed here.
                 stmt = stmt.on_conflict_do_nothing(
-                    index_elements=["tx_hash"],
+                    index_elements=["tx_hash", "ts"],
                     index_where=text("tx_hash IS NOT NULL"),
                 )
             await s.execute(stmt)

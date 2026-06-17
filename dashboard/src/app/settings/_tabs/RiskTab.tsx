@@ -16,7 +16,8 @@
 import useSWR from "swr";
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { adminApi, getAdminToken } from "@/lib/admin";
+import { adminApi } from "@/lib/admin";
+import { useAuthStatus } from "@/lib/auth-status";
 
 // ───────────────────────── types ─────────────────────────
 
@@ -138,10 +139,10 @@ function diffCount(d: RiskConfig): number {
 // ─────────────────────── component ───────────────────────
 
 export default function RiskTab() {
-  const hasToken = typeof window !== "undefined" && !!getAdminToken();
+  const authed = useAuthStatus();
 
   const { data, error, mutate, isLoading } = useSWR<SettingsResponse>(
-    hasToken ? "/admin/settings/" : null,
+    authed ? "/admin/settings/" : null,
     // The settings route requires X-Admin-Token for ALL methods, so we route
     // even reads through adminApi. With SWR's null key, fetching is disabled
     // when no token is present (we render the gated state below instead).
@@ -176,12 +177,15 @@ export default function RiskTab() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  if (!hasToken) {
+  if (!authed) {
     return (
       <div className="card text-sm space-y-2">
-        <div className="text-muted">Admin token required to view or edit risk config.</div>
+        <div className="text-muted">
+          Not signed in — connect your wallet (header) or paste an admin token
+          (kill-switch widget on home).
+        </div>
         <Link href="/" className="text-accent hover:underline">
-          ← back to home (kill-switch widget has the token paste field)
+          ← back to home
         </Link>
       </div>
     );

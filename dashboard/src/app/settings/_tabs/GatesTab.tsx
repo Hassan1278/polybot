@@ -15,7 +15,8 @@
 import { useState } from "react";
 import useSWR from "swr";
 import { API } from "@/lib/api";
-import { adminApi, getAdminToken } from "@/lib/admin";
+import { adminApi } from "@/lib/admin";
+import { useAuthStatus } from "@/lib/auth-status";
 
 // ---- types -------------------------------------------------------------
 
@@ -69,20 +70,21 @@ const settingsFetcher = (path: string) => adminApi.get(path) as Promise<Settings
 // ---- component ---------------------------------------------------------
 
 export default function GatesTab() {
-  const hasToken = typeof window !== "undefined" && !!getAdminToken();
+  const authed = useAuthStatus();
 
   const { data, error, isLoading, mutate } = useSWR<SettingsResponse>(
-    hasToken ? "/admin/settings/" : null,
+    authed ? "/admin/settings/" : null,
     settingsFetcher,
     { refreshInterval: 15000 },
   );
 
-  if (!hasToken) {
+  if (!authed) {
     return (
       <div className="card">
         <p className="text-sm text-muted">
-          Admin token not set. Paste it in the kill-switch widget on the{" "}
-          <a href="/" className="text-accent underline">home page</a> first.
+          Not signed in. Click <span className="text-accent">Connect Wallet</span>{" "}
+          in the header, or paste an admin token in the kill-switch widget on the{" "}
+          <a href="/" className="text-accent underline">home page</a>.
         </p>
       </div>
     );

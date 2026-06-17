@@ -18,7 +18,8 @@
 import useSWR from "swr";
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { adminApi, getAdminToken } from "@/lib/admin";
+import { adminApi } from "@/lib/admin";
+import { useAuthStatus } from "@/lib/auth-status";
 
 type CategoryConfig = {
   enabled: boolean;
@@ -50,32 +51,24 @@ const swrAdminFetcher = async (path: string): Promise<SettingsPayload> => {
 const DEBOUNCE_MS = 600;
 
 export default function CategoriesTab() {
-  // Re-render once the admin token appears so the SWR key flips on.
-  const [hasToken, setHasToken] = useState<boolean>(() => !!getAdminToken());
-  useEffect(() => {
-    if (hasToken) return;
-    const id = setInterval(() => {
-      if (getAdminToken()) setHasToken(true);
-    }, 1000);
-    return () => clearInterval(id);
-  }, [hasToken]);
+  const authed = useAuthStatus();
 
   const { data, error, isLoading, mutate } = useSWR<SettingsPayload>(
-    hasToken ? "/admin/settings/" : null,
+    authed ? "/admin/settings/" : null,
     swrAdminFetcher,
     { refreshInterval: 10000 },
   );
 
   const [mutationError, setMutationError] = useState<string | null>(null);
 
-  if (!hasToken) {
+  if (!authed) {
     return (
       <div className="card text-sm text-muted space-y-2">
-        <div>Admin token not set in this tab.</div>
+        <div>Not signed in.</div>
         <div>
-          Paste it into the kill-switch widget on the{" "}
-          <Link href="/" className="text-accent hover:underline">home page</Link>{" "}
-          first.
+          Click <span className="text-accent">Connect Wallet</span> in the
+          header — or paste an admin token in the kill-switch widget on the{" "}
+          <Link href="/" className="text-accent hover:underline">home page</Link>.
         </div>
       </div>
     );

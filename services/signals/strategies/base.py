@@ -62,12 +62,18 @@ class Candidate:
         Keeps backward compat with code that hasn't migrated off `dict`
         access — extra fields are merged into the top level so callers
         can still write `c["wallets"]` etc.
+
+        Note: BOTH `score` and `correlation_score` are emitted. The engine
+        and the correlation_score gate both look for `correlation_score`
+        (the historical name from `cluster_active_wallets`), while some
+        legacy callers read `score`. Emitting both removes the foot-gun.
         """
         d: dict[str, Any] = {
             "market_id": self.market_id,
             "outcome": self.outcome,
             "side": self.side,
             "score": self.score,
+            "correlation_score": self.score,
             "avg_price": self.avg_price,
         }
         d.update(self.extra)

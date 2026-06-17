@@ -19,9 +19,10 @@
  */
 
 import type React from "react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import useSWR from "swr";
-import { adminApi, getAdminToken } from "@/lib/admin";
+import { adminApi } from "@/lib/admin";
+import { useAuthStatus } from "@/lib/auth-status";
 import ConfirmModal from "@/components/ConfirmModal";
 
 type Wallet = {
@@ -58,10 +59,10 @@ function fmtDate(s: string): string {
 }
 
 export default function WalletTab() {
-  const haveToken = typeof window !== "undefined" && !!getAdminToken();
+  const authed = useAuthStatus();
 
   const { data, error, isLoading, mutate } = useSWR<Wallet[]>(
-    haveToken ? "/admin/settings/wallet" : null,
+    authed ? "/admin/settings/wallet" : null,
     (path: string) => adminApi.get(path) as Promise<Wallet[]>,
     { refreshInterval: 15000 },
   );
@@ -82,13 +83,29 @@ export default function WalletTab() {
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
-  if (!haveToken) {
+  // Defense-in-depth for the private-key field:
+  //   1. Warn before navigation (close-tab / route change) while a key sits
+  //      in the textarea, so an accidental click doesn't drop the key.
+  //   2. Zero the state on unmount so React releases the reference.
+  useEffect(() => {
+    if (!privateKey) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [privateKey]);
+  useEffect(() => () => setPrivateKey(""), []);
+
+  if (!authed) {
     return (
       <div className="card">
         <h2 className="text-lg font-bold mb-2">Wallets</h2>
         <p className="text-sm text-muted">
-          Admin token not set. Paste it into the kill-switch widget on the{" "}
-          <a href="/" className="text-accent underline">home page</a> first.
+          Not signed in. Click <span className="text-accent">Connect Wallet</span>{" "}
+          in the header, or paste an admin token in the kill-switch widget on
+          the <a href="/" className="text-accent underline">home page</a>.
         </p>
       </div>
     );

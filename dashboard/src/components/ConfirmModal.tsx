@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 /**
  * Confirmation modal for destructive / high-stakes actions.
@@ -29,6 +29,14 @@ export default function ConfirmModal({
   busy?: boolean;
 }) {
   const [typed, setTyped] = useState("");
+  // Reset typed each time the modal opens. Otherwise the previous confirm
+  // text persists (e.g. after typing 'LIVE' to switch modes, the next
+  // 'DELETE wallet' confirm starts pre-filled with 'LIVE' — and if the user
+  // had successfully typed 'DELETE' to remove a wallet earlier, the next
+  // delete confirm would be one-click-enabled, defeating the safety.
+  useEffect(() => {
+    if (open) setTyped("");
+  }, [open]);
   if (!open) return null;
   const matches = typed.trim() === confirmText;
   return (

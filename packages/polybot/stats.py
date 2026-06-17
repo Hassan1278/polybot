@@ -282,8 +282,20 @@ def cluster_active_wallets(
     # Avoid division-by-zero if a caller passes a non-positive half-life.
     decay_lambda = math.log(2.0) / half_life_seconds if half_life_seconds > 0 else 0.0
 
+    # Group by outcome too — without it, multi-outcome markets (e.g.
+    # "Who wins X?" with 5+ candidates) conflate wallets betting on
+    # different outcomes into the same cluster, producing nonsense signals
+    # where the gate chain then fails or routes to the wrong token.
+    # For binary markets this is a no-op (YES/NO already imply opposite sides).
     out: list[dict] = []
-    for (market_id, side), g in rt.groupby(["market_id", "side"]):
+    has_outcome = "outcome" in rt.columns
+    group_keys = ["market_id", "outcome", "side"] if has_outcome else ["market_id", "side"]
+    for keys, g in rt.groupby(group_keys):
+        if has_outcome:
+            market_id, outcome, side = keys
+        else:
+            market_id, side = keys
+            outcome = None
         unique_wallets = g["wallet"].unique().tolist()
         n_wallets = len(unique_wallets)
         if n_wallets < min_wallets:
@@ -313,7 +325,7 @@ def cluster_active_wallets(
         out.append({
             "market_id": market_id,
             "side": side,
-            "outcome": str(g["outcome"].mode().iat[0]) if "outcome" in g else "YES",
+            "outcome": str(outcome) if outcome is not None else "YES",
             "wallets": unique_wallets,
             "avg_price": avg_price,
             "notional_usdc": notional,

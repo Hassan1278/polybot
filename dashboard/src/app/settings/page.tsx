@@ -3,7 +3,8 @@
 import useSWR from "swr";
 import Link from "next/link";
 import { useState } from "react";
-import { adminApi, getAdminToken } from "@/lib/admin";
+import { adminApi } from "@/lib/admin";
+import { useAuthStatus } from "@/lib/auth-status";
 import ModeTab from "./_tabs/ModeTab";
 import RiskTab from "./_tabs/RiskTab";
 import CategoriesTab from "./_tabs/CategoriesTab";
@@ -17,30 +18,30 @@ type TabName = (typeof TABS)[number];
 
 export default function SettingsPage() {
   const [active, setActive] = useState<TabName>("Mode");
-  const hasToken = typeof window !== "undefined" && !!getAdminToken();
+  const authed = useAuthStatus();
 
-  // Only fetch mode badge if we have a token (avoids constant 401s)
+  // Only fetch mode badge if we have any auth (avoids constant 401s)
   const { data: modeData, error: modeError } = useSWR<ModeResp>(
-    hasToken ? "/admin/settings/mode" : null,
+    authed ? "/admin/settings/mode" : null,
     (path: string) => adminApi.get(path) as Promise<ModeResp>,
     { refreshInterval: 5000 },
   );
 
-  if (!hasToken) {
+  if (!authed) {
     return (
       <div className="space-y-6">
         <header className="flex items-baseline gap-6">
           <h1 className="text-2xl font-bold">Settings</h1>
         </header>
         <div className="card">
-          <h2 className="text-sm k mb-2">Admin token required</h2>
+          <h2 className="text-sm k mb-2">Not signed in</h2>
           <p className="text-sm text-muted">
-            Settings management requires an admin token. Paste it into the kill-switch
-            widget on the{" "}
+            Click <span className="text-accent">Connect Wallet</span> in the
+            header to sign in with MetaMask, or paste an admin token into the
+            kill-switch widget on the{" "}
             <Link href="/" className="text-accent underline">
               home page
-            </Link>{" "}
-            first, then return here.
+            </Link>.
           </p>
         </div>
       </div>

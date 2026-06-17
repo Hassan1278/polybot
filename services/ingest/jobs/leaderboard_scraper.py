@@ -36,7 +36,7 @@ from polybot.db import session_scope
 from polybot.logging import get_logger
 from polybot.models import Market, Wallet, WalletStats
 from polybot.stats import wallet_stats_from_positions
-from polybot.yaml_config import categories_cfg
+from polybot.runtime_config import merged_categories
 
 log = get_logger(__name__)
 
@@ -160,7 +160,11 @@ async def _score_candidate(d: DataClient, addr: str, mkt_cat: dict[str, str | No
 
 
 async def run_leaderboard() -> None:
-    cats_cfg = categories_cfg.get().get("categories", {})
+    # merged_categories applies dashboard PATCHes (e.g. disable sports_other)
+    # without a container restart. Previously this read raw YAML, so
+    # dashboard category toggles were silently ignored by the scraper —
+    # the bot kept scraping rosters for disabled categories.
+    cats_cfg = await merged_categories()
     enabled_cats = {k: v for k, v in cats_cfg.items() if v.get("enabled")}
     if not enabled_cats:
         log.warning("leaderboard_no_categories_enabled")

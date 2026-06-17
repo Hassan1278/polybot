@@ -26,7 +26,10 @@ export function middleware(_request: NextRequest) {
     // configured external API URL (still works when NEXT_PUBLIC_API_URL
     // is set to a remote host). WS always goes direct to the api host
     // (Next rewrites don't reliably handle WebSocket).
-    `connect-src 'self' ${apiUrl} ${wsUrl} ws://localhost:8000 ws://127.0.0.1:8000`,
+    // Allow both ws:// (dev) and wss:// (HTTPS prod). Mixed content blocks
+    // ws:// on https pages, so the WS scheme is upgraded to wss in api.ts
+    // and the policy must permit it.
+    `connect-src 'self' ${apiUrl} ${wsUrl} ${wsUrl.replace(/^ws:/, "wss:")} ws://localhost:8000 ws://127.0.0.1:8000 wss://localhost:8000`,
     "img-src 'self' data:",
     // 'unsafe-eval' added back ONLY for ethers.js — the wallet sign-in
     // library uses dynamic code evaluation for BigInt math on browsers

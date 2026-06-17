@@ -74,6 +74,13 @@ async def session_scope() -> AsyncGenerator[AsyncSession, None]:
     restart, brief network hiccup, etc.). Once we have a live session, the
     inner body is NOT retried — that would risk partial side effects (Redis
     publishes, alerts) re-firing.
+
+    Note: SessionLocal() itself is sync and lazy — it doesn't open a
+    connection. To actually trigger the OperationalError inside the retry
+    block we eagerly acquire a connection via `await s.connection()` and
+    retry on THAT. Without this the retry was a no-op (an earlier audit
+    flagged this — operational errors only fired on the first execute(),
+    outside the retry, so transient blips were never recovered).
     """
     retrying = AsyncRetrying(
         retry=retry_if_exception(_is_db_transient),
@@ -81,9 +88,18 @@ async def session_scope() -> AsyncGenerator[AsyncSession, None]:
         wait=wait_exponential_jitter(initial=0.3, max=4.0),
         reraise=True,
     )
+    s: AsyncSession | None = None
     async for attempt in retrying:
         with attempt:
             s = SessionLocal()
+            try:
+                # Force an eager connect so OperationalError surfaces here,
+                # inside the retry. SessionLocal alone is lazy.
+                await s.connection()
+            except Exception:
+                await s.close()
+                raise
+    assert s is not None  # retrying re-raises on exhaustion, so we got here = success
     try:
         yield s
         await s.commit()

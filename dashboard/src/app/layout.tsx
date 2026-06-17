@@ -2,6 +2,7 @@ import "./globals.css";
 import Link from "next/link";
 import type { ReactNode } from "react";
 import KillTag from "@/components/KillTag";
+import ConnectWallet from "@/components/ConnectWallet";
 
 export const metadata = { title: "Polybot", description: "Polymarket smart-money mirror" };
 
@@ -22,7 +23,10 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             <Link href="/pipeline" className="text-muted hover:text-text">Pipeline</Link>
             <Link href="/metrics"  className="text-muted hover:text-text">Metrics</Link>
             <Link href="/settings" className="text-muted hover:text-text">Settings</Link>
-            <div className="ml-auto"><KillTag /></div>
+            <div className="ml-auto flex items-center gap-4">
+              <KillTag />
+              <ConnectWallet />
+            </div>
           </nav>
         </header>
         <main className="max-w-7xl mx-auto p-6">{children}</main>

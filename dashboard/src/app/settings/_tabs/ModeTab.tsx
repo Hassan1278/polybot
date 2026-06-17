@@ -19,6 +19,8 @@ import { useState } from "react";
 import useSWR from "swr";
 import { API } from "@/lib/api";
 import { adminApi, getAdminToken } from "@/lib/admin";
+import { useAuthStatus } from "@/lib/auth-status";
+import { getSessionToken } from "@/lib/wallet";
 import ConfirmModal from "@/components/ConfirmModal";
 
 type Mode = "paper" | "live";
@@ -57,15 +59,15 @@ function fmtInt(v: number | undefined): string {
 }
 
 export default function ModeTab() {
-  const token = typeof window !== "undefined" ? getAdminToken() : null;
+  const authed = useAuthStatus();
 
   const modeSwr = useSWR<ModeResp>(
-    token ? "/admin/settings/mode" : null,
+    authed ? "/admin/settings/mode" : null,
     (path: string) => adminApi.get(path) as Promise<ModeResp>,
     { refreshInterval: 5000 },
   );
   const settingsSwr = useSWR<SettingsResp>(
-    token ? "/admin/settings/" : null,
+    authed ? "/admin/settings/" : null,
     (path: string) => adminApi.get(path) as Promise<SettingsResp>,
     { refreshInterval: 15000 },
   );
@@ -76,14 +78,14 @@ export default function ModeTab() {
   const [err, setErr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  if (!token) {
+  if (!authed) {
     return (
       <div className="card space-y-2">
         <h2 className="text-lg font-bold">Mode</h2>
         <p className="text-sm text-muted">
-          Admin token not set. Open the{" "}
-          <a href="/" className="text-accent underline">home page</a> and paste
-          your admin token into the kill-switch widget first.
+          Not signed in. Click <span className="text-accent">Connect Wallet</span>{" "}
+          in the header, or paste an admin token in the kill-switch widget on
+          the <a href="/" className="text-accent underline">home page</a>.
         </p>
       </div>
     );
@@ -114,27 +116,34 @@ export default function ModeTab() {
       setErr("Paste a live-confirm token first.");
       return;
     }
+    const sessionTok = getSessionToken();
     const adminTok = getAdminToken();
-    if (!adminTok) {
-      setErr("Admin token missing.");
+    if (!sessionTok && !adminTok) {
+      setErr("Not signed in — connect wallet or paste admin token first.");
       return;
     }
     setBusy(true);
     try {
       // adminApi can't attach a per-call custom header, so go direct to fetch
-      // for this one endpoint to pass X-Live-Confirm.
+      // for this one endpoint to pass X-Live-Confirm. Send BOTH auth headers
+      // if available (server accepts either).
+      const headers: Record<string, string> = {
+        "X-Live-Confirm": tok,
+        "Content-Type": "application/json",
+      };
+      if (sessionTok) headers["X-Session-Token"] = sessionTok;
+      if (adminTok) headers["X-Admin-Token"] = adminTok;
       const r = await fetch(`${API}/admin/settings/mode`, {
         method: "POST",
-        headers: {
-          "X-Admin-Token": adminTok,
-          "X-Live-Confirm": tok,
-          "Content-Type": "application/json",
-        },
+        headers,
         body: JSON.stringify({ mode: "live" }),
       });
       if (r.status === 403) {
-        // Keep modal open so the operator can paste a fresh token.
-        alert("live-confirm expired/invalid, regenerate");
+        // Clear the stale token from the textarea so the operator pastes a
+        // FRESH one — leaving the old (rejected) string in place was easy to
+        // misread as "still valid, try again".
+        setConfirmToken("");
+        setErr("live-confirm expired or rejected — regenerate and re-paste.");
         return;
       }
       if (!r.ok) {

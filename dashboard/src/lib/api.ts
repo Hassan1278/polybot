@@ -42,14 +42,19 @@ export async function postAdmin(path: string, token: string, body?: unknown): Pr
   return r.json();
 }
 
-export function openWs(onMsg: (m: { channel: string; data: any }) => void): WebSocket {
+export function openWs(
+  onMsg: (m: { channel: string; data: any }) => void,
+  onState?: (state: "open" | "closed" | "error", err?: Event) => void,
+): WebSocket {
   // WS rewriting through Next.js is unreliable; always hit the api host
-  // directly. If API is "/api" (same-origin rewrite mode), build ws://host:8000.
+  // directly. Scheme matches the page scheme — wss:// on https pages,
+  // ws:// on http — so a TLS deployment doesn't trip mixed-content blocks.
   let wsBase: string;
   if (API.startsWith("/")) {
     if (typeof window !== "undefined") {
+      const scheme = window.location.protocol === "https:" ? "wss" : "ws";
       const host = window.location.hostname;
-      wsBase = `ws://${host}:8000`;
+      wsBase = `${scheme}://${host}:8000`;
     } else {
       wsBase = "ws://localhost:8000";
     }
@@ -60,5 +65,13 @@ export function openWs(onMsg: (m: { channel: string; data: any }) => void): WebS
   ws.onmessage = (e) => {
     try { onMsg(JSON.parse(e.data)); } catch {}
   };
+  ws.onopen = () => { onState?.("open"); };
+  ws.onerror = (e) => {
+    // Surface the failure — silent ws errors used to make /signals + /trades
+    // look "idle" when they were actually disconnected.
+    console.error("ws error", e);
+    onState?.("error", e);
+  };
+  ws.onclose = () => { onState?.("closed"); };
   return ws;
 }
