@@ -31,6 +31,15 @@ type Position = {
 };
 
 export default function Home() {
+  // Auth status declared FIRST — the positions SWR below depends on it
+  // (signed-out users skip the call, signed-in users use adminApi). An
+  // earlier ordering broke the prod build with "Block-scoped variable
+  // 'authed' used before its declaration" because TypeScript's TDZ rule
+  // fires on let/const before the hook ran.
+  // Subscribes to storage events so the KILL/Clear buttons re-enable as
+  // soon as the user connects MetaMask from the header.
+  const authed = useAuthStatus();
+
   const { data: hh, error: hErr } = useSWR<Health>("/health", fetcher, { refreshInterval: 5000 });
   const { data: pnl, error: pErr } = useSWR<Pnl[]>("/pnl?mode=paper&limit=720", fetcher, { refreshInterval: 30000 });
   // /positions requires admin now (audit hardening — was an info leak).
@@ -48,11 +57,6 @@ export default function Home() {
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
-  // Subscribes to storage events so the KILL/Clear buttons re-enable as
-  // soon as the user connects MetaMask from the header (previously the
-  // home page only read getSessionToken() during render → buttons stayed
-  // disabled until the user typed in the admin field).
-  const authed = useAuthStatus();
   useEffect(() => {
     const t = getAdminToken();
     if (t) setToken(t);
