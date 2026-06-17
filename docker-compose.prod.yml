@@ -67,6 +67,18 @@ services:
           memory: 512M
 
   caddy:
+    # GATED behind the `caddy` profile so deployments WITHOUT a domain
+    # don't try to start Caddy with empty POLYBOT_DOMAIN (which would
+    # produce invalid hostnames like `api.` in the Caddyfile).
+    #
+    # Activate Caddy by setting COMPOSE_PROFILES=caddy in env, or by
+    # passing --profile caddy on the CLI:
+    #   COMPOSE_PROFILES=caddy docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+    # OR
+    #   docker compose --profile caddy -f docker-compose.yml -f docker-compose.prod.yml up -d
+    #
+    # Without the profile the dashboard is reachable on :3000 directly.
+    profiles: ["caddy"]
     image: caddy:2-alpine
     container_name: polybot-caddy
     ports:
