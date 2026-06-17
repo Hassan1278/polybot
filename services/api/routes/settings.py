@@ -37,10 +37,12 @@ from polybot.models import WalletCredential
 from polybot.runtime_config import (
     clear_overrides,
     current_mode,
+    enabled_modes,
     get_overrides,
     merged_categories,
     merged_gates,
     merged_risk,
+    set_enabled_modes,
     set_mode,
     set_overrides,
 )
@@ -69,7 +71,11 @@ def _client_ip(req: Request) -> str:
 # ---- Effective settings read ----------------------------------------------
 
 
-@router.get("/", dependencies=[Depends(require_admin)])
+# Register with empty path so the full route is `/admin/settings` (no
+# trailing slash). The dashboard's fetcher calls `/admin/settings` which
+# now lands directly — no redirect, no 308/307 loop. Old callers that
+# include the trailing slash still work via FastAPI's redirect_slashes.
+@router.get("", dependencies=[Depends(require_admin)])
 async def get_effective_settings() -> dict[str, Any]:
     """Return the current effective config (yaml baseline + Redis overrides),
     plus the raw overrides so the dashboard can show diff badges.
@@ -99,8 +105,79 @@ async def get_effective_settings() -> dict[str, Any]:
 
 
 @router.get("/mode", dependencies=[Depends(require_admin)])
-async def get_mode_endpoint() -> dict[str, str]:
-    return {"mode": await current_mode()}
+async def get_mode_endpoint() -> dict[str, Any]:
+    """Return both the legacy single-mode label AND the parallel
+    `enabled_modes` set so the dashboard can render the new dual-toggle
+    UI while older clients still see `{"mode": "paper"}`.
+    """
+    return {
+        "mode": await current_mode(),
+        "enabled_modes": sorted(await enabled_modes()),
+    }
+
+
+class EnabledModesPatch(BaseModel):
+    paper: bool | None = None
+    live:  bool | None = None
+
+
+@router.patch("/mode/enabled", dependencies=[Depends(require_admin)])
+async def patch_enabled_modes(
+    body: EnabledModesPatch, request: Request,
+    x_live_confirm: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Patch the active mode SET (parallel paper+live).
+
+    Enabling `live` requires the same HMAC + live-readiness pre-validations
+    as the legacy /mode endpoint. Disabling live is unrestricted (it makes
+    the bot SAFER). Paper is always toggleable.
+
+    Refuses to leave the empty set — if you want the bot to stop trading
+    entirely, use the kill switch.
+    """
+    from polybot.config import settings as cfg
+    import hashlib
+    import hmac as _hmac
+
+    current = await enabled_modes()
+    target = set(current)
+    if body.paper is True:
+        target.add("paper")
+    elif body.paper is False:
+        target.discard("paper")
+    if body.live is True:
+        target.add("live")
+    elif body.live is False:
+        target.discard("live")
+
+    if not target:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "must leave at least one mode enabled — use the kill switch to pause trading",
+        )
+
+    # Only ADDING live (transition from no-live → live) needs the HMAC.
+    # Removing live is always allowed (de-risking the bot).
+    if "live" in target and "live" not in current:
+        if not x_live_confirm:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "enabling live requires X-Live-Confirm")
+        parts = x_live_confirm.split(":", 1)
+        if len(parts) != 2:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "bad live confirm format")
+        try:
+            ts = int(parts[0])
+        except ValueError:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "bad live confirm timestamp") from None
+        if abs(int(time.time()) - ts) > _LIVE_SWITCH_SKEW_S:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "live confirm expired")
+        secret = cfg.admin_token.get_secret_value().encode()
+        expected = _hmac.new(secret, f"switch-to-live:{ts}".encode(), hashlib.sha256).hexdigest()
+        if not _hmac.compare_digest(parts[1], expected):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "bad live confirm hmac")
+        await _validate_live_ready()
+
+    new_modes = await set_enabled_modes(target, actor=f"admin@{_client_ip(request)}")
+    return {"enabled_modes": sorted(new_modes), "mode": await current_mode()}
 
 
 @router.get("/mode/live-challenge", dependencies=[Depends(require_admin)])

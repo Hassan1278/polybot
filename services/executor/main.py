@@ -20,6 +20,7 @@ from polybot.health_server import HealthBeacon, run_health_server
 from polybot.logging import get_logger
 from polybot.models import AuditLog, Fill, Market
 from polybot.redis_bus import publish, xack, xautoclaim, xconsume, xdlq
+from polybot.runtime_config import current_mode, enabled_modes
 from services.executor.live import place_live
 from services.executor.paper import simulate_fill
 from services.executor.pnl_loop import pnl_loop
@@ -90,73 +91,83 @@ async def handle(sig: dict) -> None:
                                     "valid": valid_outcomes}))
         return
 
-    try:
-        await preflight(mode=settings.trading_mode, market_id=market_id,
-                        category=category, side=side, size_usdc=size_usdc, score=score)
-    except RiskRejection as rej:
-        log.warning("risk_rejected", signal=sid, reason=str(rej))
-        async with session_scope() as s:
-            s.add(AuditLog(actor="executor", event="risk_rejected",
-                           payload={"signal_id": sid, "reason": str(rej)}))
-        try:
-            await alerts.risk_rejected_alert(reason=str(rej), signal_id=sid)
-        except Exception:  # noqa: BLE001
-            log.exception("alerts_risk_rejected_failed")
+    # PARALLEL paper+live mode. Each enabled mode runs INDEPENDENTLY: own
+    # risk preflight, own Fill row, own publish. This lets the operator
+    # keep a paper-shadow running while testing live with real USDC — the
+    # paper run is the control group, the live run is the experiment.
+    #
+    # Mode set comes from runtime_config (Redis override > default).
+    # Defaults to {"paper"} so existing single-mode behavior is preserved.
+    # The legacy `current_mode()` still returns "live" when live is in
+    # the active set (preserves backward compat for code that needs ONE
+    # mode label — e.g. health dashboard's mode badge).
+    modes = await enabled_modes()
+    if not modes:
+        log.warning("executor_no_modes_enabled", signal=sid)
         return
 
-    # Route execution by RUNTIME mode (dashboard-flippable), not boot-time.
-    # Without this a paper→live flip leaves the executor still routing to
-    # simulate_fill until the container is restarted — the user's "Switch to
-    # Live" button looked successful but the bot kept paper-trading.
-    from polybot.runtime_config import current_mode as _current_mode
-    exec_mode = await _current_mode()
-    if exec_mode == "paper":
-        result = await simulate_fill(
-            signal_id=sid, market_id=market_id, outcome=outcome,
-            side=side, size_usdc=size_usdc,
-        )
-    else:
-        if not settings.can_sign:
-            # Audit-trail fix: previously this branch silently returned,
-            # leaving no Fill row and no alert — operator had to read
-            # executor logs to figure out why orders weren't flowing.
-            # Now record a rejected Fill so the dashboard shows it.
-            log.error("live_mode_no_creds", signal=sid)
-            from datetime import datetime, timezone
-
-            from polybot.models import Fill
-            async with session_scope() as s:
-                s.add(Fill(
-                    signal_id=sid,
-                    ts=datetime.now(tz=timezone.utc),
-                    mode="live",
-                    market_id=market_id,
-                    outcome=outcome,
-                    side=side,
-                    size_shares=0.0, price=0.0, notional_usdc=0.0, fee_usdc=0.0,
-                    status="rejected", error="live_mode_no_creds",
-                ))
-            try:
-                await alerts.notify(
-                    "critical",
-                    "Live signal dropped: no signing credential",
-                    f"signal_id={sid} market={market_id[:18]} — add a wallet "
-                    "via /admin/settings/wallet or set POLYMARKET_PRIVATE_KEY",
-                )
-            except Exception:  # noqa: BLE001
-                log.exception("alerts_no_creds_failed")
-            return
-        result = await place_live(
-            signal_id=sid, market_id=market_id, outcome=outcome,
-            side=side, size_usdc=size_usdc,
-        )
-    await publish("fill:new", {"signal_id": sid, "result": result, "mode": exec_mode})
-
-    if isinstance(result, dict) and result.get("status") in ("filled", "submitted", "partial"):
+    from datetime import datetime, timezone
+    results: dict[str, dict] = {}
+    for exec_mode in sorted(modes):  # deterministic order: live first only if alphabetical wins
         try:
-            await alerts.fill_alert(result)
-        except Exception:  # noqa: BLE001
-            log.exception("alerts_fill_failed")
+            await preflight(mode=exec_mode, market_id=market_id,
+                            category=category, side=side, size_usdc=size_usdc, score=score)
+        except RiskRejection as rej:
+            log.warning("risk_rejected", signal=sid, mode=exec_mode, reason=str(rej))
+            async with session_scope() as s:
+                s.add(AuditLog(actor="executor", event="risk_rejected",
+                               payload={"signal_id": sid, "mode": exec_mode, "reason": str(rej)}))
+            try:
+                await alerts.risk_rejected_alert(reason=f"{exec_mode}:{rej}", signal_id=sid)
+            except Exception:  # noqa: BLE001
+                log.exception("alerts_risk_rejected_failed")
+            continue
+
+        if exec_mode == "paper":
+            result = await simulate_fill(
+                signal_id=sid, market_id=market_id, outcome=outcome,
+                side=side, size_usdc=size_usdc,
+            )
+        else:  # live
+            if not settings.can_sign:
+                # No signing credential — record a rejected Fill so the
+                # dashboard surfaces the gap. Paper still runs in parallel.
+                log.error("live_mode_no_creds", signal=sid)
+                async with session_scope() as s:
+                    s.add(Fill(
+                        signal_id=sid,
+                        ts=datetime.now(tz=timezone.utc),
+                        mode="live",
+                        market_id=market_id,
+                        outcome=outcome,
+                        side=side,
+                        size_shares=0.0, price=0.0, notional_usdc=0.0, fee_usdc=0.0,
+                        status="rejected", error="live_mode_no_creds",
+                    ))
+                try:
+                    await alerts.notify(
+                        "critical",
+                        "Live signal dropped: no signing credential",
+                        f"signal_id={sid} market={market_id[:18]} — add a wallet "
+                        "via /admin/settings/wallet or set POLYMARKET_PRIVATE_KEY",
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception("alerts_no_creds_failed")
+                results[exec_mode] = {"status": "rejected", "error": "live_mode_no_creds"}
+                continue
+            result = await place_live(
+                signal_id=sid, market_id=market_id, outcome=outcome,
+                side=side, size_usdc=size_usdc,
+            )
+
+        results[exec_mode] = result if isinstance(result, dict) else {"status": "ok"}
+        await publish("fill:new", {"signal_id": sid, "result": result, "mode": exec_mode})
+
+        if isinstance(result, dict) and result.get("status") in ("filled", "submitted", "partial"):
+            try:
+                await alerts.fill_alert(result)
+            except Exception:  # noqa: BLE001
+                log.exception("alerts_fill_failed")
 
 
 _STREAM = "signal:new"

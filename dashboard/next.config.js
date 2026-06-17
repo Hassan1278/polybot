@@ -9,6 +9,13 @@ const nextConfig = {
   output: "standalone",
   reactStrictMode: true,
   experimental: { typedRoutes: false },
+  // trailingSlash stays at the Next.js default (false). The earlier
+  // attempt to set it true broke the rewrite — Next.js leaked the
+  // internal `http://api:8000/...` Location header to the browser on
+  // FastAPI's trailing-slash redirect. The fix is route-side instead:
+  // the FastAPI admin/settings routes are registered with empty path
+  // (no slash) so the dashboard's `/admin/settings` fetch lands
+  // directly, no redirect.
 
   // Same-origin API proxy. Without this, browser fetches go to
   //   http://localhost:8000/positions  (cross-origin → CORS preflight,

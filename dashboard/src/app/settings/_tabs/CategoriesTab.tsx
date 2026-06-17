@@ -54,7 +54,7 @@ export default function CategoriesTab() {
   const authed = useAuthStatus();
 
   const { data, error, isLoading, mutate } = useSWR<SettingsPayload>(
-    authed ? "/admin/settings/" : null,
+    authed ? "/admin/settings" : null,
     swrAdminFetcher,
     { refreshInterval: 10000 },
   );

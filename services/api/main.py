@@ -37,7 +37,17 @@ async def lifespan(_: FastAPI):
     log.info("api_stopping")
 
 
-app = FastAPI(title="Polybot API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(
+    title="Polybot API",
+    version="0.1.0",
+    lifespan=lifespan,
+    # Keep FastAPI's default 307 redirect for / vs /foo variants. The
+    # dashboard's Next.js is configured with `trailingSlash: true` so all
+    # browser requests already use the SLASHED form (which matches the
+    # routes' registered shape), so the redirect path is never hit from
+    # the browser. Curl/CLI users hitting the no-slash form still get a
+    # 307 redirect rather than a 404.
+)
 
 # CORS — restrict to known origins. Wildcard "*" combined with
 # allow_credentials=True is an OWASP-flagged pattern (CSRF + credential

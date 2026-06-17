@@ -73,7 +73,7 @@ export default function GatesTab() {
   const authed = useAuthStatus();
 
   const { data, error, isLoading, mutate } = useSWR<SettingsResponse>(
-    authed ? "/admin/settings/" : null,
+    authed ? "/admin/settings" : null,
     settingsFetcher,
     { refreshInterval: 15000 },
   );

@@ -48,7 +48,7 @@ export default function StrategyPage() {
   // never existed; dropped.
   const authed = useAuthStatus();
   const { data: settings } = useSWR<SettingsPayload>(
-    authed ? "/admin/settings/" : null,
+    authed ? "/admin/settings" : null,
     (p: string) => adminApi.get(p) as Promise<SettingsPayload>,
     { refreshInterval: 30_000 },
   );

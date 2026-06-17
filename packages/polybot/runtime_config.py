@@ -52,25 +52,108 @@ log = get_logger(__name__)
 
 _OVERRIDE_KEY = "polybot:overrides:{scope}:{mode}"
 _MODE_KEY = "polybot:overrides:mode"
+_MODES_SET_KEY = "polybot:overrides:enabled_modes"
+
+
+async def enabled_modes() -> set[str]:
+    """Set of currently-active trading modes.
+
+    Returns one of:
+      {"paper"}        – default; pure paper-trading.
+      {"paper", "live"} – PARALLEL mode: every gate-passing signal produces
+                         one paper Fill row AND one live Fill row, with
+                         their own independent risk preflight + caps. Lets
+                         the operator run a live experiment without losing
+                         the paper control group.
+      {"live"}         – live-only (rare; the paper shadow is usually worth
+                         keeping for comparison).
+
+    Source of truth: Redis JSON array at `polybot:overrides:enabled_modes`.
+    Falls back to legacy `current_mode()` for backward compat when the
+    set hasn't been initialised — so existing deployments switch to the
+    new semantics seamlessly.
+    """
+    raw = await _redis().get(_MODES_SET_KEY)
+    if raw:
+        try:
+            data = json.loads(raw)
+            if isinstance(data, list):
+                cleaned = {m for m in data if m in ("paper", "live")}
+                if cleaned:
+                    return cleaned
+        except json.JSONDecodeError:
+            log.warning("runtime_config_bad_enabled_modes", raw=raw)
+    # Backward compat: derive from the single-mode key.
+    legacy = await current_mode()
+    return {legacy}
+
+
+async def set_enabled_modes(modes: set[str] | list[str], *, actor: str = "admin") -> set[str]:
+    """Atomically replace the active mode set.
+
+    Raises if the set is empty or contains unknown values.
+    Writes an AuditLog entry with the old/new diff.
+    """
+    cleaned = {m for m in modes if m in ("paper", "live")}
+    if not cleaned:
+        raise ValueError("enabled_modes must contain at least one of paper, live")
+    old = await enabled_modes()
+    await _redis().set(_MODES_SET_KEY, json.dumps(sorted(cleaned)))
+    await _audit(
+        "enabled_modes_changed",
+        {"old": sorted(old), "new": sorted(cleaned)},
+        actor=actor,
+    )
+    log.info("runtime_config_enabled_modes_changed",
+             old=sorted(old), new=sorted(cleaned), actor=actor)
+    return cleaned
 
 
 async def current_mode() -> str:
-    """The effective trading mode. Override in Redis > env setting.
+    """The PRIMARY trading mode for backward compat with code that needs
+    one canonical mode string.
 
-    Reads the override on every call (no TTL cache) — mode switches must
-    take effect immediately for the risk preflight.
+    Resolution order:
+      1. Explicit single-mode override at `polybot:overrides:mode`
+         (legacy — set by old /admin/settings/mode endpoint).
+      2. `enabled_modes` set: if "live" is in the set, returns "live";
+         otherwise "paper". So a parallel paper+live deployment still
+         reports "live" to dashboards that show a single mode badge.
+      3. Boot-time `settings.trading_mode` env.
     """
     raw = await _redis().get(_MODE_KEY)
     if raw and raw in ("paper", "live"):
         return raw
+    # No legacy override — derive from the modes set if it exists.
+    modes_raw = await _redis().get(_MODES_SET_KEY)
+    if modes_raw:
+        try:
+            data = json.loads(modes_raw)
+            if isinstance(data, list):
+                if "live" in data:
+                    return "live"
+                if "paper" in data:
+                    return "paper"
+        except json.JSONDecodeError:
+            pass
     return settings.trading_mode
 
 
 async def set_mode(mode: str, *, actor: str = "admin") -> None:
+    """Legacy single-mode switch.
+
+    Kept for backward compat with the existing /admin/settings/mode
+    endpoint. Also updates `enabled_modes` to {mode} so the two stay
+    coherent when an operator uses the legacy endpoint.
+    """
     if mode not in ("paper", "live"):
         raise ValueError(f"bad mode: {mode!r}")
     old = await current_mode()
     await _redis().set(_MODE_KEY, mode)
+    # Coherence: legacy endpoint should also reset the parallel set so
+    # operators don't end up with mode="paper" + enabled_modes={"paper","live"}
+    # which would silently keep live running after a "switch to paper".
+    await _redis().set(_MODES_SET_KEY, json.dumps([mode]))
     await _audit("mode_switched", {"old": old, "new": mode}, actor=actor)
     log.info("runtime_config_mode_changed", old=old, new=mode, actor=actor)
 

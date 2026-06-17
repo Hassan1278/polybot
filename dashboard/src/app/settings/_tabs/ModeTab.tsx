@@ -1,18 +1,17 @@
 "use client";
 
 /**
- * ModeTab — paper/live mode switcher.
+ * ModeTab — paper/live PARALLEL mode toggles.
  *
- * Paper->live transitions place real USDC at risk so they go through
- * ConfirmModal AND require an X-Live-Confirm HMAC token. The browser
- * cannot compute that token without the admin secret, so this UI
- * shows a copy-paste command for the operator to run on the API host
- * and a textarea to paste the resulting `{epoch}:{hmac}` string.
+ * The bot supports both modes running concurrently: every gate-passing
+ * signal produces one Fill row per active mode, each with its own risk
+ * preflight + caps. This lets the operator keep a paper shadow running
+ * while live experiments with real money.
  *
- * NOTE: this is a workaround. The proper fix is a server-issued
- * challenge endpoint (GET /admin/settings/mode/live-challenge) that
- * returns a fresh token the browser can echo back. Not implemented
- * server-side yet — tracked as a follow-up.
+ * Enabling live still goes through ConfirmModal + a server-issued
+ * X-Live-Confirm HMAC + live-readiness pre-checks (kill switch off,
+ * wallet credential present, encryption key configured). Disabling
+ * live is unrestricted (it always makes the bot safer).
  */
 
 import { useState } from "react";
@@ -25,7 +24,7 @@ import ConfirmModal from "@/components/ConfirmModal";
 
 type Mode = "paper" | "live";
 
-type ModeResp = { mode: Mode };
+type ModeResp = { mode: Mode; enabled_modes?: Mode[] };
 
 type RiskShape = {
   max_position_usdc?: number;
@@ -44,9 +43,6 @@ type SettingsResp = {
   overrides?: unknown;
   baseline?: { risk?: RiskShape };
 };
-
-const LIVE_CONFIRM_CMD =
-  `docker compose exec api python -c "import hashlib,hmac,time,os; secret=open('.env').read().split('ADMIN_TOKEN=')[1].split(chr(10))[0].encode(); ts=str(int(time.time())); print(f'{ts}:{hmac.new(secret, b\\"switch-to-live:\\"+ts.encode(), hashlib.sha256).hexdigest()}')"`;
 
 function fmtUsdc(v: number | undefined): string {
   if (v === undefined || v === null || Number.isNaN(v)) return "—";
@@ -67,7 +63,7 @@ export default function ModeTab() {
     { refreshInterval: 5000 },
   );
   const settingsSwr = useSWR<SettingsResp>(
-    authed ? "/admin/settings/" : null,
+    authed ? "/admin/settings" : null,
     (path: string) => adminApi.get(path) as Promise<SettingsResp>,
     { refreshInterval: 15000 },
   );
@@ -76,7 +72,6 @@ export default function ModeTab() {
   const [confirmToken, setConfirmToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
 
   if (!authed) {
     return (
@@ -92,40 +87,80 @@ export default function ModeTab() {
   }
 
   const currentMode: Mode | null = modeSwr.data?.mode ?? null;
-  const isPaper = currentMode === "paper";
-  const isLive = currentMode === "live";
+  const enabledModes = new Set<Mode>(modeSwr.data?.enabled_modes ?? (currentMode ? [currentMode] : []));
+  const paperOn = enabledModes.has("paper");
+  const liveOn = enabledModes.has("live");
 
-  const switchToPaper = async () => {
-    setErr(null);
-    setBusy(true);
-    try {
-      await adminApi.post("/admin/settings/mode", { mode: "paper" });
-      await modeSwr.mutate();
-      await settingsSwr.mutate();
-    } catch (e: any) {
-      setErr(String(e?.message ?? e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const switchToLive = async () => {
+  const patchModes = async (patch: { paper?: boolean; live?: boolean }, liveConfirm?: string) => {
     setErr(null);
     const sessionTok = getSessionToken();
     const adminTok = getAdminToken();
     if (!sessionTok && !adminTok) {
       setErr("Not signed in — connect wallet or paste admin token first.");
-      return;
+      return false;
     }
     setBusy(true);
     try {
-      // Server-issued live challenge — fetch fresh on the click. No more
-      // copy-paste `docker compose exec` hoop for the operator. The token
-      // is bound to a 60s skew window enforced server-side.
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (sessionTok) headers["X-Session-Token"] = sessionTok;
+      if (adminTok) headers["X-Admin-Token"] = adminTok;
+      if (liveConfirm) headers["X-Live-Confirm"] = liveConfirm;
+      const r = await fetch(`${API}/admin/settings/mode/enabled/`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify(patch),
+      });
+      if (r.status === 403) {
+        setConfirmToken("");
+        setErr("live-confirm expired or rejected — try the live toggle again.");
+        return false;
+      }
+      if (!r.ok) {
+        const text = await r.text();
+        throw new Error(`PATCH /mode/enabled ${r.status}: ${text.slice(0, 200)}`);
+      }
+      await modeSwr.mutate();
+      await settingsSwr.mutate();
+      return true;
+    } catch (e: any) {
+      setErr(String(e?.message ?? e));
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const togglePaper = async () => {
+    if (paperOn && !liveOn) {
+      setErr("Can't disable paper while live is also off — use the kill switch to pause everything.");
+      return;
+    }
+    await patchModes({ paper: !paperOn });
+  };
+
+  const toggleLive = async () => {
+    if (liveOn) {
+      // Disabling live is unrestricted (it makes the bot SAFER).
+      if (!paperOn) {
+        setErr("Re-enable paper before disabling live — the bot needs at least one mode.");
+        return;
+      }
+      await patchModes({ live: false });
+      return;
+    }
+    // Enabling live → confirm modal + live-challenge token.
+    setErr(null);
+    setConfirmOpen(true);
+  };
+
+  const confirmEnableLive = async () => {
+    setErr(null);
+    setBusy(true);
+    try {
       let tok = confirmToken.trim();
       if (!tok) {
         try {
-          const challenge = await adminApi.get("/admin/settings/mode/live-challenge") as { confirm_token: string };
+          const challenge = await adminApi.get("/admin/settings/mode/live-challenge/") as { confirm_token: string };
           tok = challenge?.confirm_token ?? "";
         } catch (e) {
           setErr(`failed to fetch live challenge: ${e instanceof Error ? e.message : String(e)}`);
@@ -136,50 +171,13 @@ export default function ModeTab() {
         setErr("could not obtain live-confirm token");
         return;
       }
-      // adminApi can't attach a per-call custom header, so go direct to fetch
-      // for this one endpoint to pass X-Live-Confirm. Send BOTH auth headers
-      // if available (server accepts either).
-      const headers: Record<string, string> = {
-        "X-Live-Confirm": tok,
-        "Content-Type": "application/json",
-      };
-      if (sessionTok) headers["X-Session-Token"] = sessionTok;
-      if (adminTok) headers["X-Admin-Token"] = adminTok;
-      const r = await fetch(`${API}/admin/settings/mode`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ mode: "live" }),
-      });
-      if (r.status === 403) {
-        // Clear the stale token from the textarea so the operator pastes a
-        // FRESH one — leaving the old (rejected) string in place was easy to
-        // misread as "still valid, try again".
+      const ok = await patchModes({ live: true }, tok);
+      if (ok) {
+        setConfirmOpen(false);
         setConfirmToken("");
-        setErr("live-confirm expired or rejected — regenerate and re-paste.");
-        return;
       }
-      if (!r.ok) {
-        const text = await r.text();
-        throw new Error(`mode switch ${r.status}: ${text.slice(0, 200)}`);
-      }
-      setConfirmOpen(false);
-      setConfirmToken("");
-      await modeSwr.mutate();
-      await settingsSwr.mutate();
-    } catch (e: any) {
-      setErr(String(e?.message ?? e));
     } finally {
       setBusy(false);
-    }
-  };
-
-  const copyCmd = async () => {
-    try {
-      await navigator.clipboard.writeText(LIVE_CONFIRM_CMD);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* clipboard blocked — operator can select manually */
     }
   };
 
@@ -190,7 +188,7 @@ export default function ModeTab() {
     <div className="space-y-4">
       <div className="card space-y-3">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-bold">Mode</h2>
+          <h2 className="text-lg font-bold">Active modes</h2>
           {modeSwr.error ? (
             <span className="text-xs text-danger">
               {String(modeSwr.error.message ?? modeSwr.error)}
@@ -198,36 +196,30 @@ export default function ModeTab() {
           ) : null}
         </div>
 
-        <div className="flex items-center gap-4">
-          <span className="k">current</span>
-          {currentMode === null ? (
-            <span className="px-4 py-2 rounded-lg bg-bg2 text-muted font-mono">…</span>
-          ) : isPaper ? (
-            <span className="px-4 py-2 rounded-lg bg-accent/20 border border-accent text-accent font-bold text-xl tracking-widest">
-              PAPER
-            </span>
-          ) : (
-            <span className="px-4 py-2 rounded-lg bg-danger/20 border border-danger text-danger font-bold text-xl tracking-widest">
-              LIVE
-            </span>
-          )}
-        </div>
+        <p className="text-xs text-muted">
+          Each enabled mode runs in PARALLEL. Every gate-passing signal produces
+          one Fill row per active mode, each with its own risk preflight. Run
+          paper alongside live to keep a shadow control group while the bot
+          handles real USDC.
+        </p>
 
-        <div className="flex gap-2 pt-2">
-          <button
-            className="px-3 py-2 rounded border border-accent/60 text-accent hover:bg-accent/10 disabled:opacity-40 disabled:cursor-not-allowed"
-            onClick={switchToPaper}
-            disabled={busy || isPaper || currentMode === null}
-          >
-            Switch to Paper
-          </button>
-          <button
-            className="px-3 py-2 rounded border border-danger/60 text-danger hover:bg-danger/10 disabled:opacity-40 disabled:cursor-not-allowed"
-            onClick={() => { setErr(null); setConfirmOpen(true); }}
-            disabled={busy || isLive || currentMode === null}
-          >
-            Switch to Live
-          </button>
+        <div className="grid grid-cols-2 gap-3">
+          <ModeChip
+            label="PAPER"
+            on={paperOn}
+            busy={busy}
+            onToggle={togglePaper}
+            tone="accent"
+            description="Simulated fills against the live orderbook. No USDC at risk."
+          />
+          <ModeChip
+            label="LIVE"
+            on={liveOn}
+            busy={busy}
+            onToggle={toggleLive}
+            tone="danger"
+            description="EIP-712 signed orders posted to Polymarket. Real USDC."
+          />
         </div>
 
         {err ? (
@@ -277,61 +269,59 @@ export default function ModeTab() {
 
       <ConfirmModal
         open={confirmOpen}
-        title="Switch to LIVE — real USDC at risk"
+        title="Enable LIVE — real USDC at risk"
         body={
           "Live mode places REAL orders on Polymarket with REAL USDC.\n\n" +
-          "Risk caps tighten automatically (max position, daily loss, per-category exposure all reduce).\n\n" +
-          "You also need a live-confirm token — copy the command below, run it on the API host, and paste the result into the box."
+          "The bot already verified your wallet credential, kill-switch state,\n" +
+          "and encryption key. Confirming below will fetch a fresh challenge\n" +
+          "token from the server (no copy-paste of docker commands needed).\n\n" +
+          "Paper mode stays enabled in parallel — you keep a shadow control\n" +
+          "group running while live experiments with real money."
         }
         confirmText="LIVE"
         busy={busy}
         onCancel={() => { setConfirmOpen(false); setConfirmToken(""); setErr(null); }}
-        onConfirm={switchToLive}
+        onConfirm={confirmEnableLive}
       />
+    </div>
+  );
+}
 
-      {/*
-        Helper UI for the live-confirm token. ConfirmModal is a black-box
-        component (we can't push extra children inside it), so we render the
-        instructions as a sibling overlay anchored above the modal's confirm
-        button while the modal is open.
-      */}
-      {confirmOpen ? (
-        <div className="fixed inset-0 z-[60] flex items-end justify-center p-4 pointer-events-none">
-          <div className="card max-w-md w-full space-y-2 pointer-events-auto bg-panel mb-2 border border-white/10">
-            <h4 className="text-sm font-semibold">Live-confirm token</h4>
-            <p className="text-xs text-muted">
-              1. Copy this command and run it on the API host:
-            </p>
-            <div className="relative">
-              <pre className="text-[10px] bg-bg2 border border-white/10 rounded p-2 overflow-x-auto whitespace-pre-wrap break-all font-mono">
-                {LIVE_CONFIRM_CMD}
-              </pre>
-              <button
-                className="absolute top-1 right-1 text-[10px] px-2 py-0.5 rounded border border-white/10 text-muted hover:text-text bg-panel"
-                onClick={copyCmd}
-                type="button"
-              >
-                {copied ? "copied" : "copy"}
-              </button>
-            </div>
-            <label className="block text-xs k mt-2">
-              2. Paste live-confirm token (epoch:hmac):
-            </label>
-            <textarea
-              className="w-full h-16 bg-bg2 border border-white/10 rounded px-2 py-1 font-mono text-xs"
-              value={confirmToken}
-              onChange={(e) => setConfirmToken(e.target.value)}
-              placeholder="1717689600:a1b2c3..."
-              spellCheck={false}
-            />
-            <p className="text-[10px] text-muted">
-              Workaround: a server-issued challenge endpoint
-              (/admin/settings/mode/live-challenge) is the proper fix and is
-              not yet implemented.
-            </p>
-          </div>
-        </div>
-      ) : null}
+function ModeChip({
+  label, on, busy, onToggle, tone, description,
+}: {
+  label: string;
+  on: boolean;
+  busy: boolean;
+  onToggle: () => void;
+  tone: "accent" | "danger";
+  description: string;
+}) {
+  const palette = tone === "accent"
+    ? { onClasses: "bg-accent/20 border-accent text-accent",
+        offClasses: "bg-bg2/40 border-white/10 text-muted",
+        buttonOn: "border-accent/60 text-accent hover:bg-accent/10",
+        buttonOff: "border-accent/30 text-accent hover:bg-accent/10" }
+    : { onClasses: "bg-danger/20 border-danger text-danger",
+        offClasses: "bg-bg2/40 border-white/10 text-muted",
+        buttonOn: "border-danger/60 text-danger hover:bg-danger/10",
+        buttonOff: "border-danger/30 text-danger hover:bg-danger/10" };
+  return (
+    <div className={`rounded-lg border p-4 space-y-2 ${on ? palette.onClasses : palette.offClasses}`}>
+      <div className="flex items-center justify-between">
+        <span className="font-bold text-lg tracking-widest">{label}</span>
+        <span className={`text-xs font-mono ${on ? "" : "text-muted"}`}>
+          {on ? "ON" : "OFF"}
+        </span>
+      </div>
+      <p className="text-xs leading-relaxed">{description}</p>
+      <button
+        className={`w-full px-3 py-1.5 rounded border text-sm disabled:opacity-40 disabled:cursor-not-allowed ${on ? palette.buttonOn : palette.buttonOff}`}
+        onClick={onToggle}
+        disabled={busy}
+      >
+        {busy ? "…" : on ? `Disable ${label}` : `Enable ${label}`}
+      </button>
     </div>
   );
 }

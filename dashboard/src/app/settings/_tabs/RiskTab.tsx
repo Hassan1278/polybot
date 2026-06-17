@@ -142,11 +142,11 @@ export default function RiskTab() {
   const authed = useAuthStatus();
 
   const { data, error, mutate, isLoading } = useSWR<SettingsResponse>(
-    authed ? "/admin/settings/" : null,
+    authed ? "/admin/settings" : null,
     // The settings route requires X-Admin-Token for ALL methods, so we route
     // even reads through adminApi. With SWR's null key, fetching is disabled
     // when no token is present (we render the gated state below instead).
-    async () => (await adminApi.get("/admin/settings/")) as SettingsResponse,
+    async () => (await adminApi.get("/admin/settings")) as SettingsResponse,
     { refreshInterval: 5000 },
   );
 
