@@ -5,6 +5,13 @@ from sqlalchemy import select
 from polybot.models import Market
 from services.signals.conditions.base import GateContext, GateResult
 
+# Hard ceiling on what the bot may EVER bet. The YAML/Redis `allow` list can
+# NARROW within this set but can never broaden beyond it — a stray dashboard
+# toggle or Redis override can't re-enable sports (or anything else) behind the
+# operator's back. To change the permitted universe, edit THIS set (and rebuild
+# the signals service).
+HARD_ALLOWED_CATEGORIES = {"macro", "politics", "crypto"}
+
 
 class CategoryMatch:
     name = "category_match"
@@ -12,14 +19,18 @@ class CategoryMatch:
 
     def __init__(self, *, enabled: bool, params: dict):
         self.enabled = enabled
-        self.allow = set(params.get("allow") or [])
-        # When True, signals on markets with no category yet (e.g. fresh
-        # markets the bulk ingest hasn't tagged) still pass. The bot was
-        # dropping ~95% of clusters with `unknown_category` even though
-        # the rest of the gate chain would have correctly priced+sized
-        # the trade. Default True so new operators see more activity;
-        # flip to False for the strictest selectivity.
-        self.allow_uncategorized = bool(params.get("allow_uncategorized", True))
+        configured = {str(c).lower() for c in (params.get("allow") or [])}
+        # Effective allow = configured ∩ hard ceiling. Empty config => the full
+        # ceiling. Config can only ever subtract from HARD_ALLOWED_CATEGORIES.
+        self.allow = (
+            (configured & HARD_ALLOWED_CATEGORIES)
+            if configured else set(HARD_ALLOWED_CATEGORIES)
+        )
+        # With a hard category whitelist, an untagged market is by definition
+        # NOT one of the allowed categories (it could be anything, incl. sports).
+        # Default to rejecting it so "only these categories" actually holds; the
+        # param can still force-pass uncategorized markets if explicitly True.
+        self.allow_uncategorized = bool(params.get("allow_uncategorized", False))
 
     async def evaluate(self, ctx: GateContext) -> GateResult:
         if not self.enabled:
@@ -32,6 +43,6 @@ class CategoryMatch:
             if self.allow_uncategorized:
                 return GateResult(self.name, self.type, True, "uncategorized — permissive pass")
             return GateResult(self.name, self.type, False, "unknown_category")
-        if self.allow and cat not in self.allow:
+        if str(cat).lower() not in self.allow:
             return GateResult(self.name, self.type, False, f"category_not_allowed:{cat}")
         return GateResult(self.name, self.type, True, f"category:{cat}")

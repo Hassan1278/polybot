@@ -35,24 +35,21 @@
 
 gates:
 
-  # 1. Market must belong to a tracked category.
-  #    sports_other is intentionally excluded by default — too noisy.
-  #    Add it back if you want broader coverage (see "few-signals-fire-more").
+  # 1. Market must belong to an allowed category.
+  #    HARD-CEILINGED in code: services/signals/conditions/category.py defines
+  #    HARD_ALLOWED_CATEGORIES = {macro, politics, crypto}. This `allow` list
+  #    can only NARROW within that set — it can never re-enable sports etc.,
+  #    even via a Redis/dashboard override. To widen the universe you must edit
+  #    HARD_ALLOWED_CATEGORIES and rebuild the signals service.
   - name: category_match
     type: hard
     enabled: true
     params:
-      # 'sports' is the legacy bucket — markets categorised before the
-      # sports_major/sports_other split. Keep it allowed so the bot doesn't
-      # blackhole 987 already-categorised markets until the next market_ingest
-      # pass re-tags them. Drop 'sports' once market_ingest has re-classified.
-      #
-      # sports_other (tennis, eSports, MMA, lower-tier soccer) re-enabled
-      # for the OPS / infrastructure test phase: gives high signal volume
-      # so we can exercise the pipeline (fills, settlement, alerts) without
-      # waiting for politics/crypto news. Expect ~80% of fills here to be
-      # noise (coinflips × fees). Drop again before real money runs.
-      allow: [politics, sports, sports_major, sports_other, crypto, macro]
+      # Only these three. (Anything outside the code ceiling is ignored anyway.)
+      allow: [macro, politics, crypto]
+      # Untagged markets could be ANY category (incl. sports), so don't let
+      # them bypass the whitelist. Keep false for "only these categories".
+      allow_uncategorized: false
 
   # 2. Wallet quality — production floor. Sharps below 50% win-rate on a
   #    30d window are usually directionally random; we'd rather skip than fade.
