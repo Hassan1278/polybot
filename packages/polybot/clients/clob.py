@@ -188,7 +188,7 @@ class ClobClient(HttpClient):
             signature_type=sig_type,
             funder=funder,
         )
-        c.set_api_creds(c.create_or_derive_api_creds())
+        c.set_api_creds(c.create_or_derive_api_key())
         self._signed = c
         log.info("clob_signed_client_ready", funder=funder)
         return c
@@ -252,19 +252,28 @@ class ClobClient(HttpClient):
         # task on timeout (the underlying HTTP request will still complete
         # eventually, but we no longer wait for it).
         import asyncio
-        from py_clob_client_v2.clob_types import OrderArgs  # type: ignore
+        from py_clob_client_v2.clob_types import OrderArgs, OrderType  # type: ignore
+
+        # The installed SDK wants an OrderType enum, not a raw string. Map our
+        # internal labels to the venue's types: GTC for resting maker limits,
+        # FAK (fill-and-kill) for the immediate "taker" path (Polymarket has no
+        # "IOC" — FAK is the equivalent). Fall back to GTC for anything odd.
+        _OT = {"GTC": "GTC", "GTD": "GTD", "FOK": "FOK", "FAK": "FAK", "IOC": "FAK"}
+        ot = getattr(OrderType, _OT.get((order_type or "GTC").upper(), "GTC"), None)
+        if ot is None:
+            ot = getattr(OrderType, "GTC")
 
         def _do() -> Any:
             args = OrderArgs(price=price, size=size, side=side, token_id=token_id)
             signed = c.create_order(args)
-            return c.post_order(signed, order_type)
+            return c.post_order(signed, ot)
 
         return await asyncio.wait_for(asyncio.to_thread(_do), timeout=20.0)
 
     async def cancel(self, order_id: str) -> dict[str, Any]:
         c = self._signed_client()
         import asyncio
-        return await asyncio.wait_for(asyncio.to_thread(c.cancel, order_id), timeout=10.0)
+        return await asyncio.wait_for(asyncio.to_thread(c.cancel_order, order_id), timeout=10.0)
 
     async def cancel_all(self) -> dict[str, Any]:
         c = self._signed_client()
@@ -274,4 +283,4 @@ class ClobClient(HttpClient):
     async def open_orders(self) -> list[dict[str, Any]]:
         c = self._signed_client()
         import asyncio
-        return await asyncio.to_thread(c.get_orders)
+        return await asyncio.to_thread(c.get_open_orders)
