@@ -32,8 +32,22 @@ async def list_onchain_balances(s: AsyncSession = Depends(get_session)) -> dict:
     if not rows:
         return {"wallets": [], "note": "no active wallet credentials configured"}
 
+    # CRITICAL: read the FUNDER address, not the signer `address`.
+    #
+    # On Polymarket the USDC collateral lives in the *funder* (proxy) wallet
+    # for signature_type 1 (email/magic) and 2 (browser) — which is the
+    # default. The signer `address` is only the key that signs orders and
+    # holds essentially no USDC (gas is paid by Polymarket's relayer for
+    # proxy wallets). Only for a pure EOA (sig_type 0) is funder == signer.
+    #
+    # Reading `w.address` here showed USDC.e == $0.00 for every proxy wallet
+    # even when the account was fully funded — i.e. "something is wrong with
+    # the USDC". Read the funder so the dashboard reflects the balance the
+    # venue actually trades against. Fall back to the signer if funder is
+    # somehow unset (older/EOA rows).
+    targets = [(w, (w.funder_address or w.address)) for w in rows]
     results = await asyncio.gather(
-        *(asyncio.to_thread(read_balances, w.address) for w in rows),
+        *(asyncio.to_thread(read_balances, addr) for _, addr in targets),
         return_exceptions=False,
     )
     return {
@@ -43,10 +57,13 @@ async def list_onchain_balances(s: AsyncSession = Depends(get_session)) -> dict:
                 "label":          w.label,
                 "address":        w.address,
                 "funder_address": w.funder_address,
+                # which address the balances below were actually read from
+                # (the funder/collateral wallet for proxy sig-types).
+                "balance_of":     addr,
                 "is_active":      w.is_active,
                 "balances":       bal,
             }
-            for w, bal in zip(rows, results)
+            for (w, addr), bal in zip(targets, results)
         ],
     }
 

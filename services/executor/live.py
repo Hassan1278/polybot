@@ -117,9 +117,14 @@ def _allowance_hint() -> None:
     if not getattr(_allowance_hint, "_warned", False):
         log.warning(
             "live_allowance_hint",
-            msg=("Ensure USDC.e (0x2791Bca1...) approval to the CTF Exchange "
-                 "is set for the funder address; otherwise orders will be "
-                 "rejected by the venue. Run the one-off approve tx if unsure."),
+            msg=("FUNDER must approve USDC.e (0x2791Bca1...) AND the CTF "
+                 "(ERC1155, 0x4D97DCd9...) to ALL THREE Polymarket spenders: "
+                 "the CTF Exchange, the Neg-Risk CTF Exchange, and the "
+                 "Neg-Risk Adapter. This bot trades multi-outcome markets "
+                 "(sports/elections) which settle through the Neg-Risk "
+                 "contracts — approving only the plain CTF Exchange leaves "
+                 "every multi-outcome order rejected with 'not enough "
+                 "allowance'. Set the approvals once from the FUNDER wallet."),
             funder=getattr(settings, "polymarket_funder_address", None),
         )
         _allowance_hint._warned = True  # type: ignore[attr-defined]

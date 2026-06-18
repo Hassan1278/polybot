@@ -24,6 +24,9 @@ type OnchainWallet = {
   label: string;
   address: string;
   funder_address: string | null;
+  // address the balances were actually read from (funder/collateral wallet
+  // for proxy sig-types; equals `address` only for a pure EOA).
+  balance_of?: string | null;
   is_active: boolean;
   balances: OnchainBalances;
 };
@@ -136,8 +139,11 @@ export default function Home() {
             <div key={w.id} className="grid grid-cols-4 gap-4 py-2 border-t border-[#1c1c25] first:border-t-0">
               <div>
                 <div className="text-xs text-muted">{w.label}</div>
-                <div className="text-xs font-mono" title={w.address}>
-                  {w.address.slice(0, 6)}…{w.address.slice(-4)}
+                <div className="text-xs font-mono" title={w.balance_of ?? w.address}>
+                  {(w.balance_of ?? w.address).slice(0, 6)}…{(w.balance_of ?? w.address).slice(-4)}
+                </div>
+                <div className="text-[10px] text-muted">
+                  {w.balance_of && w.balance_of !== w.address ? "funder / collateral" : "signer (EOA)"}
                 </div>
               </div>
               <Stat k="USDC.e"
