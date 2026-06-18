@@ -184,10 +184,22 @@ async def get_overrides(scope: str, mode: str | None = None) -> dict[str, Any]:
     if not raw:
         return {}
     try:
-        return json.loads(raw) or {}
+        data = json.loads(raw)
     except json.JSONDecodeError:
         log.warning("runtime_config_bad_json", scope=scope, mode=mode)
         return {}
+    # Overrides MUST be a JSON object. A non-dict value (string / list /
+    # number — e.g. a hand-edited redis key, a partially-written payload, or
+    # a value from an older buggy writer) would crash the merge path
+    # (_shallow_merge does {**base} then patch.items(); merged_categories
+    # spreads {**patch}) and 500 the ENTIRE /admin/settings read — which
+    # takes the whole dashboard Settings page down, every tab. Coerce to {}
+    # and warn so the read path always degrades to the YAML baseline.
+    if not isinstance(data, dict):
+        log.warning("runtime_config_override_not_dict",
+                    scope=scope, mode=mode, got=type(data).__name__)
+        return {}
+    return data
 
 
 async def set_overrides(
@@ -265,6 +277,14 @@ async def merged_categories(mode: str | None = None) -> dict[str, Any]:
     overrides = await get_overrides("categories", mode)
     out: dict[str, Any] = {k: {**v} for k, v in base.items()}
     for name, patch in overrides.items():
+        # Defence in depth: a per-category override whose value isn't an
+        # object (e.g. {"politics": "enabled"}) can't be merged onto the
+        # category dict — skip it instead of raising, which would 500
+        # /admin/settings. get_overrides already guards the top level.
+        if not isinstance(patch, dict):
+            log.warning("runtime_config_bad_category_patch",
+                        name=name, got=type(patch).__name__)
+            continue
         if name in out:
             out[name] = {**out[name], **patch}
         else:
