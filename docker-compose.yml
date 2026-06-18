@@ -131,6 +131,29 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # Order-signing sidecar for live CLOB V2 trading (deposit-wallet / POLY_1271).
+  # Only the live executor talks to it; paper mode never touches it. See
+  # docs/V2_LIVE_MIGRATION.md. Phase 1 = health endpoint only.
+  clob-rs:
+    build:
+      context: ./services/clob-rs
+    container_name: polybot-clob-rs
+    env_file: .env
+    environment:
+      SIGNER_KEY:             ${POLYMARKET_PRIVATE_KEY:-}
+      FUNDER_ADDRESS:         ${POLYMARKET_FUNDER_ADDRESS:-}
+      SIGNATURE_TYPE:         ${POLYMARKET_SIGNATURE_TYPE:-3}
+      POLYMARKET_CLOB_V2_URL: ${POLYMARKET_CLOB_V2_URL:-https://clob-v2.polymarket.com}
+    ports:
+      - "8082:8082"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8082/health >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
 volumes:
   postgres-data:
   redis-data:
