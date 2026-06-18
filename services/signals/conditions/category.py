@@ -11,7 +11,10 @@ from services.signals.conditions.base import GateContext, GateResult
 # operator's back. `weather` and `worldcup` are deliberate carve-outs (see
 # categorize.py) so we trade those WITHOUT opening all of sports.
 # To change the permitted universe, edit THIS set (and rebuild the signals svc).
-HARD_ALLOWED_CATEGORIES = {"macro", "politics", "crypto", "weather", "worldcup"}
+HARD_ALLOWED_CATEGORIES = {
+    "macro", "politics", "crypto", "weather", "worldcup",
+    "sports_major", "sports_other",
+}
 
 
 class CategoryMatch:

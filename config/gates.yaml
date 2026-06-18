@@ -48,7 +48,7 @@ gates:
       # weather + worldcup are carve-outs (see categorize.py) so we get them
       # WITHOUT opening all of sports. (Anything outside the code ceiling is
       # ignored anyway.)
-      allow: [macro, politics, crypto, weather, worldcup]
+      allow: [macro, politics, crypto, weather, worldcup, sports_major, sports_other]
       # Untagged markets could be ANY category (incl. other sports), so don't
       # let them bypass the whitelist. Keep false for "only these categories".
       allow_uncategorized: false
@@ -117,6 +117,12 @@ gates:
       # looks like in your dataset.
       min_score: 0.05
       min_wallets: 2
+      # Per-category confidence floors (override min_score for these buckets).
+      # Sports was our biggest live loser/noise, so re-enabled ONLY on strong
+      # clusters — sports must score >= 0.5; everything else keeps 0.05.
+      category_min_score:
+        sports_major: 0.5
+        sports_other: 0.5
 
   # 7. Cool-down — avoid re-firing the same market on every tick.
   - name: cooldown

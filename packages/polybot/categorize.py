@@ -78,6 +78,23 @@ _KW: dict[str, tuple[set[str], tuple[str, ...]]] = {
             "basis points", "soft landing",
         ),
     ),
+    # Low-priority catch-all for recognizable sports / esports — checked LAST
+    # so politics/crypto/macro always win a tie. Tag-based classification still
+    # produces sports_major for tagged majors; this recovers the untagged ones
+    # (your tag recall on sports was ~0). All sports get the same gate treatment.
+    "sports_other": (
+        {
+            "nfl", "nba", "nhl", "mlb", "ufc", "mma", "boxing", "tennis", "atp",
+            "wta", "golf", "pga", "cricket", "rugby", "nascar", "esports", "cs2",
+            "dota", "valorant",
+        },
+        (
+            "counter-strike", "league of legends", "premier league",
+            "champions league", "super bowl", "world series", "stanley cup",
+            "grand slam", "formula 1", "grand prix", "la liga", "serie a",
+            "bundesliga",
+        ),
+    ),
 }
 
 
