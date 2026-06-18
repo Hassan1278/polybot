@@ -27,6 +27,11 @@ log = get_logger(__name__)
 TICK = 0.001
 MIN_PX = 0.001
 MAX_PX = 0.999
+# Polymarket V2 rejects orders below 5 shares ("Size (x) lower than the
+# minimum: 5"). Floor every live order at this so small-dollar signals still
+# place instead of being bounced before they can rest. The bumped notional is
+# at most ~5 * price ≈ a few dollars, well under max_position_usdc.
+MIN_SHARES = 5.0
 
 
 def _round_to_tick(px: float, tick: float = TICK) -> float:
@@ -181,6 +186,12 @@ async def place_live(*, signal_id: int, market_id: str, outcome: str,
                                  reason=f"price_out_of_range:{px}")
 
         shares = size_usdc / px
+        # Enforce the venue's 5-share floor (see MIN_SHARES). Below it the CLOB
+        # rejects with "Size lower than the minimum: 5", so bump up and keep the
+        # recorded notional consistent with what we actually sent.
+        if shares < MIN_SHARES:
+            shares = MIN_SHARES
+        notional = round(shares * px, 6)
 
         try:
             resp = await c.place_limit(token_id=token_id, side=side.upper(),
@@ -219,7 +230,7 @@ async def place_live(*, signal_id: int, market_id: str, outcome: str,
     status = (resp.get("status") or "submitted").lower()
     venue_id = resp.get("orderID") or resp.get("orderId")
     return await _record(signal_id, market_id, outcome, side, status,
-                         shares=shares, price=px, notional=size_usdc,
+                         shares=shares, price=px, notional=notional,
                          venue_order_id=venue_id, raw=resp)
 
 
