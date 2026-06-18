@@ -26,6 +26,7 @@ from polybot.db import session_scope
 from polybot.logging import get_logger
 from polybot.models import Market
 from polybot.redis_bus import client as redis_client
+from polybot.categorize import classify_market
 from polybot.yaml_config import categories_cfg
 
 log = get_logger(__name__)
@@ -118,19 +119,10 @@ def token_for_outcome(market: Any, outcome: str | None) -> str | None:
     return yes_tid
 
 
-def _category_from_tags(tags: list[str]) -> str | None:
+def _enabled_tag_map() -> dict[str, list[str]]:
+    """category -> [tag-slugs] for currently-enabled categories (YAML)."""
     cats = categories_cfg.get().get("categories", {})
-    flat: dict[str, str] = {}
-    for cat, c in cats.items():
-        if not c.get("enabled"):
-            continue
-        for t in c.get("tags") or []:
-            flat[str(t).lower()] = cat
-    for t in tags:
-        cat = flat.get(str(t).lower())
-        if cat:
-            return cat
-    return None
+    return {cat: (c.get("tags") or []) for cat, c in cats.items() if c.get("enabled")}
 
 
 async def ensure_market(market_id: str) -> Market | None:
@@ -164,7 +156,10 @@ async def ensure_market(market_id: str) -> Market | None:
     for ev in (m.get("events") or []):
         raw_tags.extend(ev.get("tags") or [])
     tags = [str(t.get("slug", "")).lower() for t in raw_tags if t]
-    cat = _category_from_tags(tags)
+    cat = classify_market(
+        tags=tags, question=m.get("question"), slug=m.get("slug"),
+        tag_map=_enabled_tag_map(),
+    )
 
     tokens = _parse_json_list(m.get("clobTokenIds"))
     outcomes_list = _parse_json_list(m.get("outcomes"))

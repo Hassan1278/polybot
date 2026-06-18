@@ -26,7 +26,13 @@
 
 categories:
   politics:
-    tags: [politics, us-politics, elections, geopolitics, trump, biden]
+    # Broadened to match Polymarket's real tag vocabulary; the keyword
+    # fallback in polybot/categorize.py catches the rest.
+    tags: [politics, us-politics, us-election, elections, election, geopolitics,
+           world, trump, donald-trump, biden, harris, kamala-harris, congress,
+           senate, president, presidential-election, republican, democrat,
+           governor, midterms, supreme-court, white-house, putin, zelensky,
+           nato, ukraine, israel, russia, china, foreign-policy]
     enabled: true
     top_n: 50
     min_win_rate: 0.55
@@ -66,13 +72,17 @@ categories:
     min_win_rate: 0.60                # stricter — long-tail markets are noisier
 
   crypto:
-    tags: [crypto, bitcoin, ethereum, defi, memecoins]
+    tags: [crypto, bitcoin, ethereum, defi, memecoins, btc, eth, solana, xrp,
+           dogecoin, crypto-prices, nft, altcoins, stablecoins, binance,
+           coinbase, ripple, cardano]
     enabled: true
     top_n: 30
     min_win_rate: 0.55
 
   macro:
-    tags: [economy, fed, inflation, cpi, gdp, recession]
+    tags: [economy, fed, inflation, cpi, gdp, recession, macro, interest-rates,
+           federal-reserve, jobs, unemployment, tariffs, treasury, economics,
+           fomc]
     enabled: true
     top_n: 20
     min_win_rate: 0.55

@@ -9,20 +9,13 @@ import httpx
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from polybot.categorize import classify_market
 from polybot.clients import GammaClient
 from polybot.db import session_scope
 from polybot.logging import get_logger
 from polybot.models import Market
 
 log = get_logger(__name__)
-
-
-def _category_from_tags(tags: list[str], mapping: dict[str, list[str]]) -> str | None:
-    flat: dict[str, str] = {t: cat for cat, ts in mapping.items() for t in ts}
-    for t in tags:
-        if t in flat:
-            return flat[t]
-    return None
 
 
 async def run_market_ingest() -> None:
@@ -66,7 +59,8 @@ async def run_market_ingest() -> None:
                     for ev in (m.get("events") or []):
                         raw_tags.extend(ev.get("tags") or [])
                     tags = [str(t.get("slug", "")).lower() for t in raw_tags if t]
-                    cat = _category_from_tags(tags, tag_map)
+                    cat = classify_market(tags=tags, question=m.get("question"),
+                                          slug=m.get("slug"), tag_map=tag_map)
 
                     # Gamma returns clobTokenIds + outcomes as JSON-encoded
                     # strings: clobTokenIds='["yes_id","no_id"]', outcomes='["Yes","No"]'
