@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+import httpx
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -38,8 +39,22 @@ async def run_market_ingest() -> None:
         page = 0
         total = 0
         while True:
-            ms = await g.markets(limit=page_size, offset=page * page_size,
-                                 active=True, closed=False)
+            try:
+                ms = await g.markets(limit=page_size, offset=page * page_size,
+                                     active=True, closed=False)
+            except httpx.HTTPStatusError as exc:
+                # Gamma returns 422 (not an empty page) once `offset` runs past
+                # the end of the available market set — it caps pagination at
+                # ~2000. Treat a 4xx on a LATER page as "no more pages" so one
+                # tail rejection doesn't fail the whole ingest cycle (markets
+                # from earlier pages are already committed per-page). A 4xx on
+                # page 0 is a genuine error, so re-raise that.
+                if page > 0 and exc.response.status_code in (400, 422):
+                    log.info("market_ingest_pagination_end", page=page,
+                             offset=page * page_size,
+                             status=exc.response.status_code)
+                    break
+                raise
             if not ms:
                 break
             async with session_scope() as s:
