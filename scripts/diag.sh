@@ -100,4 +100,43 @@ fi
 H "10. Alembic migration version"
 docker exec polybot-api alembic -c alembic.ini current 2>&1 | tail -3
 
+H "11. Signal pipeline — freshness (is fresh data flowing in?)"
+docker exec polybot-postgres psql -U polybot -d polybot -c "
+    SELECT 'last_trade_ingested'  AS what, max(ts)::text AS at FROM trades
+    UNION ALL SELECT 'last_market_update', max(updated_at)::text FROM markets
+    UNION ALL SELECT 'last_signal_evaluated', max(ts)::text FROM audit_log WHERE event='signal_evaluated'
+    UNION ALL SELECT 'last_signal_FIRED', max(ts)::text FROM signals WHERE gate_pass = true
+    UNION ALL SELECT 'active_tracked_wallets', count(*)::text FROM wallets WHERE is_active
+;" 2>&1
+
+H "12. Signal funnel — where are signals dying? (last 1h)"
+# Each evaluation short-circuits on the FIRST failing HARD gate, so a 'false'
+# count here = signals that died AT that gate. The biggest number is your
+# bottleneck. opposing_smart_money is soft (never blocks).
+docker exec polybot-postgres psql -U polybot -d polybot -c "
+    SELECT
+      count(*)                                                                       AS evaluated,
+      count(*) FILTER (WHERE payload->>'pass'='true')                                AS fired,
+      count(*) FILTER (WHERE payload->'gates'->'category_match'->>'pass'='false')     AS die_category,
+      count(*) FILTER (WHERE payload->'gates'->'wallet_quality'->>'pass'='false')     AS die_wallet_quality,
+      count(*) FILTER (WHERE payload->'gates'->'liquidity'->>'pass'='false')          AS die_liquidity,
+      count(*) FILTER (WHERE payload->'gates'->'risk_reward'->>'pass'='false')        AS die_risk_reward,
+      count(*) FILTER (WHERE payload->'gates'->'timeframe'->>'pass'='false')          AS die_timeframe,
+      count(*) FILTER (WHERE payload->'gates'->'correlation_score'->>'pass'='false')  AS die_correlation,
+      count(*) FILTER (WHERE payload->'gates'->'cooldown'->>'pass'='false')           AS die_cooldown
+    FROM audit_log WHERE event='signal_evaluated' AND ts > now() - interval '1 hour'
+;" 2>&1
+
+H "13. category_match reason breakdown (last 1h)"
+docker exec polybot-postgres psql -U polybot -d polybot -c "
+    SELECT payload->'gates'->'category_match'->>'reason' AS category_gate, count(*)
+    FROM audit_log WHERE event='signal_evaluated' AND ts > now() - interval '1 hour'
+    GROUP BY 1 ORDER BY 2 DESC LIMIT 20
+;" 2>&1
+
+H "14. Correlation engine heartbeat — is it finding candidates?"
+# candidates_found:0 every pass = no clusters of tracked wallets on the same
+# market in the window (an INPUT problem, not a gate problem).
+docker logs polybot-signals --tail 300 2>&1 | grep -i correlation_heartbeat | tail -6
+
 H "DIAG COMPLETE — copy this entire output and paste to the assistant"
