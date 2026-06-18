@@ -156,13 +156,22 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "https://clob-v2.polymarket.com".to_string());
     let funder_env = env::var("FUNDER_ADDRESS").ok().filter(|s| !s.is_empty());
 
-    let builder = Client::new(&host, Config::default())?.authentication_builder(&signer);
-    let builder = match &funder_env {
-        Some(f) => builder
-            .funder(Address::from_str(f)?)
-            .signature_type(SignatureType::Poly1271),
-        None => builder,
+    // 0=EOA 1=Proxy 2=GnosisSafe 3=Poly1271(deposit wallet). Default 3 for
+    // V2 deposit wallets; env-overridable so we can switch without rebuilding
+    // if the account turns out to be a Safe (2).
+    let sig_raw = env::var("SIGNATURE_TYPE").unwrap_or_else(|_| "3".to_string());
+    let sig_type = match sig_raw.trim() {
+        "0" => SignatureType::Eoa,
+        "1" => SignatureType::Proxy,
+        "2" => SignatureType::GnosisSafe,
+        _ => SignatureType::Poly1271,
     };
+    let mut builder = Client::new(&host, Config::default())?
+        .authentication_builder(&signer)
+        .signature_type(sig_type);
+    if let Some(f) = &funder_env {
+        builder = builder.funder(Address::from_str(f)?);
+    }
     let client = builder.authenticate().await?;
 
     let funder = funder_env.unwrap_or_else(|| format!("{:?}", signer.address()));

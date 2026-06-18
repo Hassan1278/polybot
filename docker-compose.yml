@@ -140,11 +140,10 @@ services:
     container_name: polybot-clob-rs
     env_file: .env
     environment:
-      SIGNER_KEY:          ${POLYMARKET_PRIVATE_KEY:-}
-      FUNDER_ADDRESS:      ${POLYMARKET_FUNDER_ADDRESS:-}
-      SIGNATURE_TYPE:      "3"
-      POLYMARKET_CLOB_URL: ${POLYMARKET_CLOB_URL:-https://clob.polymarket.com}
-      POLYGON_CHAIN_ID:    ${POLYGON_CHAIN_ID:-137}
+      SIGNER_KEY:             ${POLYMARKET_PRIVATE_KEY:-}
+      FUNDER_ADDRESS:         ${POLYMARKET_FUNDER_ADDRESS:-}
+      SIGNATURE_TYPE:         ${POLYMARKET_SIGNATURE_TYPE:-3}
+      POLYMARKET_CLOB_V2_URL: ${POLYMARKET_CLOB_V2_URL:-https://clob-v2.polymarket.com}
     ports:
       - "8082:8082"
     healthcheck:

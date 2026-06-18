@@ -1,13 +1,17 @@
-"""Thin wrapper around `py_clob_client_v2`.
+"""Polymarket CLOB client.
 
-For read-only orderbook data we use httpx directly (no key needed, fewer deps
-loaded in services that never trade). The signing/order paths defer to the
-official client.
+Read-only orderbook data goes over httpx directly (no auth needed). The
+signing/order path (place + cancel orders) is delegated to the `clob-rs`
+sidecar over HTTP: the Python CLOB v2 SDK cannot sign for V2 deposit wallets
+(POLY_1271), but the Rust SDK can. See docs/V2_LIVE_MIGRATION.md.
 """
 
 from __future__ import annotations
 
+import os
 from typing import Any
+
+import httpx
 
 from polybot.clients._http import HttpClient
 from polybot.config import settings
@@ -15,40 +19,14 @@ from polybot.logging import get_logger
 
 log = get_logger(__name__)
 
-# Module-level sync engine cache. We need ONE sync SQLAlchemy engine
-# across the entire process for the wallet-credential decrypt path;
-# previously each ClobClient signing call created a fresh
-# `create_engine(...)` and never disposed it, leaking ~5 pooled
-# connections per call. Postgres's `max_connections` (default 100) would
-# trip after ~20 live signals.
-_SYNC_ENGINE = None
-_SYNC_SESSION_FACTORY = None
-
-
-def _get_sync_session_factory():
-    global _SYNC_ENGINE, _SYNC_SESSION_FACTORY
-    if _SYNC_SESSION_FACTORY is None:
-        from sqlalchemy import create_engine
-        from sqlalchemy.orm import sessionmaker
-
-        # The async URL works for sync too (psycopg backend covers both).
-        # NOTE: no `.replace("+psycopg", "+psycopg")` — that was a typo
-        # no-op in the old code.
-        _SYNC_ENGINE = create_engine(
-            settings.database_url,
-            pool_pre_ping=True,
-            pool_size=2,         # tiny — wallet decrypt is rare
-            max_overflow=2,
-            pool_recycle=300,
-        )
-        _SYNC_SESSION_FACTORY = sessionmaker(_SYNC_ENGINE, expire_on_commit=False)
-    return _SYNC_SESSION_FACTORY
+# Order-signing sidecar (services/clob-rs). Reachable on the internal docker
+# network; override for local runs via CLOB_RS_URL.
+_CLOB_RS_URL = os.environ.get("CLOB_RS_URL", "http://clob-rs:8082").rstrip("/")
 
 
 class ClobClient(HttpClient):
     def __init__(self) -> None:
         super().__init__(settings.polymarket_clob_url)
-        self._signed = None  # lazily built when a signing call comes in
 
     # ---- public read-only --------------------------------------------------
 
@@ -136,151 +114,51 @@ class ClobClient(HttpClient):
     async def trades_market(self, market_id: str, *, limit: int = 100) -> list[dict[str, Any]]:
         return await self.get("/trades", params={"market": market_id, "limit": limit})
 
-    # ---- signed ------------------------------------------------------------
+    # ---- signed (delegated to the clob-rs sidecar) -------------------------
     #
-    # Defer to the official py-clob-client-v2 SDK only when we actually need to
-    # sign. Built lazily so paper-mode never imports/initialises it.
-
-    def _signed_client(self):  # type: ignore[no-untyped-def]
-        if self._signed is not None:
-            return self._signed
-
-        try:
-            from py_clob_client_v2.client import ClobClient as _Sdk  # type: ignore
-        except ImportError as exc:
-            raise RuntimeError("py-clob-client-v2 not installed — run `pip install py-clob-client-v2`") from exc
-
-        # Prefer DB-stored wallet credential (encrypted, dashboard-managed).
-        # Fall back to .env-based key only if DB has no active credential —
-        # this keeps the legacy paper-test wiring alive while we migrate.
-        creds = self._load_active_wallet_credential()
-        if creds is not None:
-            key_b = creds["private_key"]
-            # The stored ciphertext decrypts to EITHER the 32 raw key bytes
-            # (add_wallet's hex path: bytes.fromhex) OR the key as a utf-8 hex
-            # string (the non-hex fallback path). py-clob-client wants a hex
-            # string, so reconstruct it. Blindly decoding 32 raw key bytes as
-            # utf-8 raised UnicodeDecodeError and broke ALL live signing.
-            if isinstance(key_b, (bytes, bytearray)):
-                key = ("0x" + key_b.hex()) if len(key_b) == 32 else key_b.decode("utf-8")
-            else:
-                key = key_b
-            funder = creds["funder_address"]
-            sig_type = creds["signature_type"]
-            log.info("clob_signed_client_using_db_credential",
-                     wallet_id=creds["id"], funder=funder)
-        elif settings.can_sign:
-            key = settings.polymarket_private_key.get_secret_value()
-            funder = settings.polymarket_funder_address
-            sig_type = settings.polymarket_signature_type
-            log.warning("clob_signed_client_using_env_fallback", funder=funder,
-                        msg="DB has no active wallet — using .env (deprecated)")
-        else:
-            raise RuntimeError(
-                "no signing credential available — add a wallet via "
-                "POST /admin/settings/wallet or set POLYMARKET_PRIVATE_KEY"
-            )
-
-        c = _Sdk(
-            host=settings.polymarket_clob_url,
-            key=key,
-            chain_id=settings.polygon_chain_id,
-            signature_type=sig_type,
-            funder=funder,
-        )
-        c.set_api_creds(c.create_or_derive_api_key())
-        self._signed = c
-        log.info("clob_signed_client_ready", funder=funder)
-        return c
-
-    @staticmethod
-    def _load_active_wallet_credential() -> dict | None:
-        """Sync helper that loads + decrypts the active wallet from the
-        `wallet_credentials` table. Runs in a fresh sync connection (the
-        py-clob-client SDK is sync, so we're already on a worker thread
-        when this is called). Returns None if no active credential exists
-        or decryption fails — caller falls back to env.
-
-        The sync engine is process-cached (via `_get_sync_engine`) so each
-        call reuses one pool instead of leaking ~5 connections per call —
-        a previous version created a fresh `create_engine(...)` per
-        invocation and never disposed it, draining Postgres `max_connections`
-        on a high-fill day.
-        """
-        try:
-            from datetime import datetime, timezone
-
-            from sqlalchemy import select
-
-            from polybot.crypto import decrypt
-            from polybot.models.wallet_credential import WalletCredential
-
-            session_local = _get_sync_session_factory()
-            with session_local() as s:
-                row = s.execute(
-                    select(WalletCredential)
-                    .where(WalletCredential.is_active.is_(True))
-                    .order_by(WalletCredential.created_at.desc())
-                    .limit(1)
-                ).scalar_one_or_none()
-                if row is None:
-                    return None
-                aad = f"wallet:{row.address.lower()}:signing".encode()
-                key_bytes = decrypt(bytes(row.encrypted_private_key), aad=aad)
-                # touch last_used_at for ops visibility
-                row.last_used_at = datetime.now(tz=timezone.utc)
-                s.commit()
-                return {
-                    "id": row.id,
-                    "address": row.address,
-                    "funder_address": row.funder_address,
-                    "signature_type": row.signature_type,
-                    "private_key": key_bytes,
-                }
-        except Exception:  # noqa: BLE001
-            log.exception("clob_load_wallet_failed")
-            return None
+    # CLOB V2 deposit-wallet (POLY_1271) order signing runs in the Rust
+    # `clob-rs` service; these are thin HTTP calls to it. Paper mode never
+    # reaches here, so the sidecar only needs to be up for live trading.
 
     async def place_limit(
         self, *, token_id: str, side: str, price: float, size: float, order_type: str = "GTC"
     ) -> dict[str, Any]:
-        c = self._signed_client()
-        # py-clob-client-v2 is sync — run in a thread so we don't block the loop.
-        # Wrap in a 20 s timeout so a wedged HTTP call (network blip,
-        # signer hanging on Magic SDK) doesn't park the executor's
-        # consumer indefinitely. asyncio.wait_for cancels the to_thread
-        # task on timeout (the underlying HTTP request will still complete
-        # eventually, but we no longer wait for it).
-        import asyncio
-        from py_clob_client_v2.clob_types import OrderArgs, OrderType  # type: ignore
+        """Place a limit order via the clob-rs sidecar.
 
-        # The installed SDK wants an OrderType enum, not a raw string. Map our
-        # internal labels to the venue's types: GTC for resting maker limits,
-        # FAK (fill-and-kill) for the immediate "taker" path (Polymarket has no
-        # "IOC" — FAK is the equivalent). Fall back to GTC for anything odd.
-        _OT = {"GTC": "GTC", "GTD": "GTD", "FOK": "FOK", "FAK": "FAK", "IOC": "FAK"}
-        ot = getattr(OrderType, _OT.get((order_type or "GTC").upper(), "GTC"), None)
-        if ot is None:
-            ot = getattr(OrderType, "GTC")
-
-        def _do() -> Any:
-            args = OrderArgs(price=price, size=size, side=side, token_id=token_id)
-            signed = c.create_order(args)
-            return c.post_order(signed, ot)
-
-        return await asyncio.wait_for(asyncio.to_thread(_do), timeout=20.0)
+        Returns ``{"status", "orderID", "raw"}`` on success; raises
+        RuntimeError with the venue's reason on rejection so the caller
+        records it on the Fill. ``order_type`` is accepted for interface
+        compatibility (the V2 limit path rests as GTC).
+        """
+        payload = {
+            "token_id": str(token_id),
+            "side": side.upper(),
+            "price": f"{price}",
+            "size": f"{size}",
+        }
+        async with httpx.AsyncClient(timeout=25.0) as c:
+            r = await c.post(f"{_CLOB_RS_URL}/order", json=payload)
+        try:
+            data = r.json()
+        except Exception:  # noqa: BLE001
+            data = {}
+        status = str(data.get("status") or "").lower()
+        if r.status_code >= 400 or status == "rejected" or data.get("success") is False:
+            raise RuntimeError(data.get("error") or f"clob_rs_http_{r.status_code}")
+        return {"status": status or "submitted", "orderID": data.get("order_id"), "raw": data}
 
     async def cancel(self, order_id: str) -> dict[str, Any]:
-        c = self._signed_client()
-        import asyncio
-        return await asyncio.wait_for(asyncio.to_thread(c.cancel_order, order_id), timeout=10.0)
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.post(f"{_CLOB_RS_URL}/cancel", json={"order_id": order_id})
+        return r.json() if r.content else {}
 
     async def cancel_all(self) -> dict[str, Any]:
-        c = self._signed_client()
-        import asyncio
-        return await asyncio.to_thread(c.cancel_all)
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.post(f"{_CLOB_RS_URL}/cancel-all")
+        return r.json() if r.content else {}
 
     async def open_orders(self) -> list[dict[str, Any]]:
-        c = self._signed_client()
-        import asyncio
-        return await asyncio.to_thread(c.get_open_orders)
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.get(f"{_CLOB_RS_URL}/orders")
+        d = r.json() if r.content else []
+        return d if isinstance(d, list) else []
