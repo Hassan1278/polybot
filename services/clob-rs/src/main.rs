@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use alloy_signer_local::PrivateKeySigner;
 use polymarket_client_sdk_v2::auth::state::Authenticated;
 use polymarket_client_sdk_v2::auth::{Normal, Signer as _};
-use polymarket_client_sdk_v2::clob::types::{Side, SignatureType};
+use polymarket_client_sdk_v2::clob::types::{Side, SignatureType, TickSize};
 use polymarket_client_sdk_v2::clob::{Client, Config};
 use polymarket_client_sdk_v2::types::{Address, Decimal, U256};
 use polymarket_client_sdk_v2::POLYGON;
@@ -89,6 +89,22 @@ async fn place_order(
     };
 
     let result: anyhow::Result<_> = async {
+        // Round the price to THIS market's tick size — the builder rejects a
+        // price with more decimals than the tick (e.g. 0.341 on a 0.01 market).
+        // Round size to 2 dp (Polymarket share precision). Fall back to 0.01
+        // tick (2 dp) if the tick lookup fails.
+        let dp: u32 = match st.client.tick_size(token).await {
+            Ok(t) => match t.minimum_tick_size {
+                TickSize::Tenth => 1,
+                TickSize::Hundredth => 2,
+                TickSize::Thousandth => 3,
+                TickSize::TenThousandth => 4,
+                _ => 2,
+            },
+            Err(_) => 2,
+        };
+        let price = price.round_dp(dp);
+        let size = size.round_dp(2);
         let order = st
             .client
             .limit_order()
