@@ -75,10 +75,11 @@ gates:
     type: hard
     enabled: true
     params:
-      # 75 USDC = 3× our $25 paper position size — sane safety margin without
-      # rejecting every long-tail sport market. Raise to 200+ once we want
-      # strict liquidity discipline (live mode).
-      min_book_depth_usdc: 75
+      # 40 USDC floor. Live bets are now ~$5-12, so this is still a 3-8x
+      # cushion over a typical order while letting thinner (but real)
+      # crypto/politics markets through. Don't go below ~30 — exit liquidity
+      # gets dangerous. Raise back toward 75-200 for stricter discipline.
+      min_book_depth_usdc: 40
       max_slippage_pct: 4.0
 
   # 4. Risk/reward — refuse the extreme tails of the price curve where
