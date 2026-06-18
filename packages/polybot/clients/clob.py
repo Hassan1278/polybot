@@ -156,7 +156,15 @@ class ClobClient(HttpClient):
         creds = self._load_active_wallet_credential()
         if creds is not None:
             key_b = creds["private_key"]
-            key = key_b.decode("utf-8") if isinstance(key_b, bytes) else key_b
+            # The stored ciphertext decrypts to EITHER the 32 raw key bytes
+            # (add_wallet's hex path: bytes.fromhex) OR the key as a utf-8 hex
+            # string (the non-hex fallback path). py-clob-client wants a hex
+            # string, so reconstruct it. Blindly decoding 32 raw key bytes as
+            # utf-8 raised UnicodeDecodeError and broke ALL live signing.
+            if isinstance(key_b, (bytes, bytearray)):
+                key = ("0x" + key_b.hex()) if len(key_b) == 32 else key_b.decode("utf-8")
+            else:
+                key = key_b
             funder = creds["funder_address"]
             sig_type = creds["signature_type"]
             log.info("clob_signed_client_using_db_credential",
