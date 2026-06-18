@@ -50,6 +50,36 @@ type Position = {
   updated_at: string | null;
 };
 
+// Live (real-money) account state read from Polymarket itself — distinct from
+// the paper ledger above. See services/api/routes/live.py.
+type LivePosition = {
+  asset: string;
+  condition_id: string | null;
+  title: string | null;
+  slug: string | null;
+  outcome: string | null;
+  size: number;
+  avg_price: number;
+  cur_price: number;
+  current_value: number;
+  initial_value: number;
+  cash_pnl: number;
+  pct_change: number | null;
+  redeemable: boolean;
+};
+type LiveAccount = {
+  configured: boolean;
+  note?: string;
+  address?: string;
+  pusd_balance?: number | null;
+  positions_value?: number;
+  unrealized_pnl?: number;
+  equity?: number | null;
+  n_positions?: number;
+  positions?: LivePosition[];
+  errors?: { balance: string | null; positions: string | null };
+};
+
 export default function Home() {
   // Auth status declared FIRST — the positions SWR below depends on it
   // (signed-out users skip the call, signed-in users use adminApi). An
@@ -76,6 +106,14 @@ export default function Home() {
   const { data: chain } = useSWR<OnchainResp>(
     authed ? "/wallets/onchain" : null,
     (p: string) => adminApi.get(p) as Promise<OnchainResp>,
+    { refreshInterval: 30000 },
+  );
+  // /live/account — REAL Polymarket state for the deposit wallet: pUSD cash
+  // (via clob-rs) + open positions/mark-to-market (via the data API). Admin-
+  // only; polls every 30s. This is the "real cockpit" the paper cards aren't.
+  const { data: live } = useSWR<LiveAccount>(
+    authed ? "/live/account" : null,
+    (p: string) => adminApi.get(p) as Promise<LiveAccount>,
     { refreshInterval: 30000 },
   );
 
@@ -121,12 +159,15 @@ export default function Home() {
         </section>
       )}
 
+      {/* These four always read the PAPER ledger (/pnl?mode=paper), so label
+          them as such — even when the bot is in live mode. Real money lives
+          in the "Live account" panel below. */}
       <section className="grid grid-cols-4 gap-4">
-        <Stat k={`Equity (${hh?.mode ?? "paper"})`}
+        <Stat k="Equity (paper)"
               v={last ? `$${last.equity.toFixed(2)}` : "—"} />
-        <Stat k="Realized"   v={last ? `$${last.realized.toFixed(2)}` : "—"} />
-        <Stat k="Unrealized" v={last ? `$${last.unrealized.toFixed(2)}` : "—"} />
-        <Stat k="Open"       v={last ? String(last.open) : "—"} />
+        <Stat k="Realized (paper)"   v={last ? `$${last.realized.toFixed(2)}` : "—"} />
+        <Stat k="Unrealized (paper)" v={last ? `$${last.unrealized.toFixed(2)}` : "—"} />
+        <Stat k="Open (paper)"       v={last ? String(last.open) : "—"} />
       </section>
 
       {authed && chain && chain.wallets.length > 0 && (
@@ -163,9 +204,89 @@ export default function Home() {
         </section>
       )}
 
+      {authed && live && live.configured && (
+        <section className="card" style={{ borderColor: "#22d39e55" }}>
+          <div className="flex items-baseline justify-between mb-2">
+            <h2 className="text-sm k text-accent">Live account — Polymarket (real money)</h2>
+            <span className="text-xs text-muted font-mono" title={live.address}>
+              {live.address ? `${live.address.slice(0, 6)}…${live.address.slice(-4)}` : ""} · 30s
+            </span>
+          </div>
+          <div className="grid grid-cols-4 gap-4 mb-3">
+            <Stat k="Equity (live)"
+                  v={live.equity != null ? `$${live.equity.toFixed(2)}` : "—"} />
+            <Stat k="pUSD (cash)"
+                  v={live.pusd_balance != null ? `$${live.pusd_balance.toFixed(2)}` : "—"} />
+            <Stat k="In positions"
+                  v={`$${(live.positions_value ?? 0).toFixed(2)}`} />
+            <Stat k="Unrealized"
+                  v={`$${(live.unrealized_pnl ?? 0).toFixed(2)}`} />
+          </div>
+
+          {(live.errors?.balance || live.errors?.positions) && (
+            <div className="text-[11px] mb-2 space-y-0.5">
+              {live.errors?.balance && (
+                <div className="text-danger">cash balance unavailable — {live.errors.balance}</div>
+              )}
+              {live.errors?.positions && (
+                <div className="text-danger">positions unavailable — {live.errors.positions}</div>
+              )}
+            </div>
+          )}
+
+          {(live.positions?.length ?? 0) === 0 ? (
+            <div className="text-xs text-muted py-1">
+              {live.errors?.positions ? "could not load live positions" : "no open positions on Polymarket"}
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="text-muted text-xs uppercase">
+                  <tr>
+                    <th className="text-left p-2">Market</th>
+                    <th className="text-left p-2">Outcome</th>
+                    <th className="text-right p-2">Size</th>
+                    <th className="text-right p-2">Avg</th>
+                    <th className="text-right p-2">Cur</th>
+                    <th className="text-right p-2">Value</th>
+                    <th className="text-right p-2">PnL</th>
+                    <th className="text-right p-2">%</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {live.positions!.map(p => (
+                    <tr key={p.asset} className="border-t border-white/5">
+                      <td className="p-2 max-w-[280px] truncate" title={p.title ?? p.slug ?? p.asset}>
+                        {p.title ?? <span className="font-mono text-xs">{p.asset.slice(0, 10)}…</span>}
+                        {p.redeemable && <span className="ml-2 text-[10px] text-accent">redeemable</span>}
+                      </td>
+                      <td className="p-2">{p.outcome ?? "—"}</td>
+                      <td className="p-2 text-right">{p.size.toFixed(2)}</td>
+                      <td className="p-2 text-right">{p.avg_price.toFixed(3)}</td>
+                      <td className="p-2 text-right">{p.cur_price.toFixed(3)}</td>
+                      <td className="p-2 text-right">${p.current_value.toFixed(2)}</td>
+                      <td className={`p-2 text-right ${pnlColor(p.cash_pnl)}`}>
+                        ${p.cash_pnl.toFixed(2)}
+                      </td>
+                      <td className={`p-2 text-right ${pnlColor(p.pct_change)}`}>
+                        {p.pct_change != null ? `${(p.pct_change * 100).toFixed(1)}%` : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p className="text-[10px] text-muted mt-2">
+            Real on-venue money (Polymarket data API + clob-rs collateral) — distinct from the
+            paper ledger below. Equity = pUSD cash + marked value of open positions.
+          </p>
+        </section>
+      )}
+
       <section className="card">
         <div className="flex items-baseline justify-between mb-2">
-          <h2 className="text-sm k">Open positions</h2>
+          <h2 className="text-sm k">Open positions — paper ledger</h2>
           <div className="flex items-center gap-3">
             <span className="text-xs text-muted">
               {open.length} open · live mark every 15s

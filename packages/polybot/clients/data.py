@@ -32,11 +32,21 @@ class DataClient(HttpClient):
 
     # ---- per-user ----------------------------------------------------------
 
-    async def positions(self, user: str, *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
-        return await self.get(
-            "/positions",
-            params={"user": user, "limit": limit, "offset": offset},
-        )
+    async def positions(
+        self,
+        user: str,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        size_threshold: float | None = None,
+    ) -> list[dict[str, Any]]:
+        # The data API hides positions below `sizeThreshold` (default 1.0
+        # share). Pass a small threshold to also surface sub-1-share live
+        # positions, which a tiny test/initial position can be.
+        params: dict[str, Any] = {"user": user, "limit": limit, "offset": offset}
+        if size_threshold is not None:
+            params["sizeThreshold"] = size_threshold
+        return await self.get("/positions", params=params)
 
     async def trades(self, user: str, *, limit: int = 500, offset: int = 0) -> list[dict[str, Any]]:
         return await self.get(

@@ -79,7 +79,19 @@ Base: `http://clob-rs:8082`
                  → `{status, order_id, raw}` or `{status:"rejected", error}`
 - `POST /cancel` ← `{order_id}` → `{ok}`
 - `POST /cancel-all` → `{ok}`
+- `GET  /balance` → `{ok, balance, funder}` — live pUSD collateral the CLOB
+  sees (human USDC units; authoritative "cash"). Powers the dashboard's live
+  account panel.
 - `GET  /orders` → `[ ... open orders ... ]`
+
+### Live dashboard panel
+`services/api/routes/live.py` (`GET /live/account`, admin-only) combines the
+sidecar's `/balance` (cash) with the data API's `/positions?user=<funder>`
+(open positions + mark-to-market) into one snapshot. The dashboard renders it
+as the **"Live account — Polymarket (real money)"** card: real equity (pUSD +
+marked positions), unrealized PnL, and the open-position table — distinct from
+the paper ledger cards. Both sources degrade independently (nulls/empty) so a
+sleeping sidecar or flaky data API never blanks the dashboard.
 
 `clob.py` keeps its current method names/return shapes so nothing upstream
 changes; it just calls these endpoints instead of the Python SDK.

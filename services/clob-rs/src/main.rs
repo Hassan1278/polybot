@@ -23,7 +23,8 @@ use serde_json::{json, Value};
 use alloy_signer_local::PrivateKeySigner;
 use polymarket_client_sdk_v2::auth::state::Authenticated;
 use polymarket_client_sdk_v2::auth::{Normal, Signer as _};
-use polymarket_client_sdk_v2::clob::types::{Side, SignatureType, TickSize};
+use polymarket_client_sdk_v2::clob::types::request::BalanceAllowanceRequest;
+use polymarket_client_sdk_v2::clob::types::{AssetType, Side, SignatureType, TickSize};
 use polymarket_client_sdk_v2::clob::{Client, Config};
 use polymarket_client_sdk_v2::types::{Address, Decimal, U256};
 use polymarket_client_sdk_v2::POLYGON;
@@ -158,6 +159,31 @@ async fn cancel_all(State(st): State<Arc<AppState>>) -> (StatusCode, Json<Value>
     }
 }
 
+// Live pUSD collateral balance the CLOB sees for the deposit wallet. This is
+// the authoritative "cash" number (the same balance the order builder checks),
+// so the dashboard can show real available collateral instead of the paper
+// ledger. `balance` is in human USDC units (dollars), serialized as a string
+// to preserve Decimal precision across the JSON hop.
+async fn balance(State(st): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
+    let req = BalanceAllowanceRequest::builder()
+        .asset_type(AssetType::Collateral)
+        .build();
+    match st.client.balance_allowance(req).await {
+        Ok(r) => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "balance": r.balance.to_string(),
+                "funder": st.funder,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"ok": false, "error": e.to_string()})),
+        ),
+    }
+}
+
 // Monitoring only — not on the trade path. The SDK's paginated `orders()` API
 // will be wired here later; an empty list is a safe degradation for callers.
 async fn list_orders() -> Json<Value> {
@@ -198,6 +224,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/order", post(place_order))
         .route("/cancel", post(cancel))
         .route("/cancel-all", post(cancel_all))
+        .route("/balance", get(balance))
         .route("/orders", get(list_orders))
         .with_state(state);
 

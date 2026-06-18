@@ -162,3 +162,17 @@ class ClobClient(HttpClient):
             r = await c.get(f"{_CLOB_RS_URL}/orders")
         d = r.json() if r.content else []
         return d if isinstance(d, list) else []
+
+    async def balance(self) -> dict[str, Any]:
+        """Live pUSD collateral balance for the deposit wallet, as the CLOB
+        sees it (via the clob-rs sidecar). Shape: ``{"ok", "balance", "funder"}``
+        on success or ``{"ok": false, "error"}`` on failure. ``balance`` is a
+        decimal string in human USDC units. Best-effort: never raises, so a
+        sleeping sidecar degrades to an error dict the dashboard can render.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=12.0) as c:
+                r = await c.get(f"{_CLOB_RS_URL}/balance")
+            return r.json() if r.content else {"ok": False, "error": "empty response"}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:140]}"}
