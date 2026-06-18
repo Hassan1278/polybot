@@ -2,7 +2,7 @@
 # Stage 1 compiles the Rust binary; stage 2 is a slim runtime.
 FROM rust:1-slim AS build
 WORKDIR /app
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release
 
