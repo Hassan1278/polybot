@@ -1,27 +1,41 @@
 """Market categorization — map a Polymarket market to one of our buckets.
 
-Two-stage, so in-scope markets don't get dropped just because Gamma's tags are
-sparse or non-standard:
+Stages, in priority order:
 
-  1. Authoritative TAG match against the configured tag->category map (covers
-     ALL configured buckets, so genuine sports etc. route to their bucket and
-     get blocked by the category gate).
-  2. KEYWORD fallback on the market question + slug, for the three TRADING
-     categories only (politics / crypto / macro). Runs only when no tag matched.
+  0. CARVE-OUTS (worldcup, weather) — matched by keyword on question+slug and
+     checked BEFORE tags, so e.g. a World-Cup match tagged generic "soccer"
+     still routes to `worldcup` (we want only World-Cup soccer, not all soccer),
+     and temperature markets route to `weather`.
+  1. Authoritative TAG match against the configured tag->category map (routes
+     genuine sports etc. to their bucket — still gate-blocked).
+  2. KEYWORD fallback on question+slug for the core trading categories
+     (politics / crypto / macro), only when no tag matched.
 
 Used by both the JIT resolver (market_resolver) and the bulk ingest so the two
-paths can't drift. The keyword lists favour recall (trade everything that's
-really politics/macro/crypto) while staying specific enough to avoid pulling in
-off-topic markets — and stage 1 catches tagged sports before stage 2 ever runs.
+paths can't drift. Keyword lists favour recall while staying specific; tokenized
+matching means "fed" can't hit "federer".
 """
 
 from __future__ import annotations
 
 import re
 
-# Whole-token keywords (matched against the tokenized text, so "fed" can't hit
-# "federer") plus multi-word phrases (plain substring). Dict order = priority
-# when a market matches more than one (all three are allowed anyway).
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+# High-priority carve-outs — win even over a sports/soccer tag. (set, phrases)
+_CARVEOUTS: dict[str, tuple[set[str], tuple[str, ...]]] = {
+    "worldcup": (
+        {"fifwc", "worldcup"},
+        ("world cup", "fifa world cup"),
+    ),
+    "weather": (
+        {"temperature", "weather", "rainfall", "snowfall", "celsius", "fahrenheit"},
+        ("highest temperature", "lowest temperature", "high temperature",
+         "low temperature"),
+    ),
+}
+
+# Core trading categories — keyword fallback (stage 2), checked only if no tag.
 _KW: dict[str, tuple[set[str], tuple[str, ...]]] = {
     "politics": (
         {
@@ -66,20 +80,23 @@ _KW: dict[str, tuple[set[str], tuple[str, ...]]] = {
     ),
 }
 
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+def _match(tokens: set[str], text: str, words: set[str], phrases: tuple[str, ...]) -> bool:
+    return bool(tokens & words) or any(p in text for p in phrases)
 
 
 def classify_keywords(question: str | None, slug: str | None) -> str | None:
-    """Keyword-only classification (stage 2). Used by the backfill, which has
-    no tags stored — only question + slug."""
+    """Keyword-only classification: carve-outs first, then core categories.
+    Used by the backfill (no tags stored — only question + slug)."""
     text = f"{question or ''} {slug or ''}".lower().strip()
     if not text:
         return None
     tokens = set(_TOKEN_RE.findall(text))
-    for cat, (words, phrases) in _KW.items():
-        if tokens & words:
+    for cat, (words, phrases) in _CARVEOUTS.items():
+        if _match(tokens, text, words, phrases):
             return cat
-        if any(p in text for p in phrases):
+    for cat, (words, phrases) in _KW.items():
+        if _match(tokens, text, words, phrases):
             return cat
     return None
 
@@ -91,8 +108,16 @@ def classify_market(
     slug: str | None,
     tag_map: dict[str, list[str]],
 ) -> str | None:
-    """Full two-stage classification. ``tag_map`` is category -> [tag-slugs]
-    (already filtered to enabled categories by the caller)."""
+    """Full classification. ``tag_map`` is category -> [tag-slugs] (already
+    filtered to enabled categories by the caller)."""
+    text = f"{question or ''} {slug or ''}".lower().strip()
+    tokens = set(_TOKEN_RE.findall(text)) if text else set()
+
+    # Stage 0 — carve-outs win even over a generic sports/soccer tag.
+    for cat, (words, phrases) in _CARVEOUTS.items():
+        if _match(tokens, text, words, phrases):
+            return cat
+
     # Stage 1 — authoritative Gamma tags.
     if tags:
         flat: dict[str, str] = {}
@@ -103,5 +128,9 @@ def classify_market(
             cat = flat.get(str(t).lower())
             if cat:
                 return cat
-    # Stage 2 — keyword fallback (trading categories only).
-    return classify_keywords(question, slug)
+
+    # Stage 2 — keyword fallback for the core trading categories.
+    for cat, (words, phrases) in _KW.items():
+        if _match(tokens, text, words, phrases):
+            return cat
+    return None

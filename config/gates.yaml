@@ -37,18 +37,21 @@ gates:
 
   # 1. Market must belong to an allowed category.
   #    HARD-CEILINGED in code: services/signals/conditions/category.py defines
-  #    HARD_ALLOWED_CATEGORIES = {macro, politics, crypto}. This `allow` list
-  #    can only NARROW within that set — it can never re-enable sports etc.,
-  #    even via a Redis/dashboard override. To widen the universe you must edit
-  #    HARD_ALLOWED_CATEGORIES and rebuild the signals service.
+  #    HARD_ALLOWED_CATEGORIES = {macro, politics, crypto, worldcup, weather}.
+  #    This `allow` list can only NARROW within that set — it can never
+  #    re-enable other sports etc., even via a Redis/dashboard override. To
+  #    widen the universe you must edit HARD_ALLOWED_CATEGORIES and rebuild
+  #    the signals service.
   - name: category_match
     type: hard
     enabled: true
     params:
-      # Only these three. (Anything outside the code ceiling is ignored anyway.)
-      allow: [macro, politics, crypto]
-      # Untagged markets could be ANY category (incl. sports), so don't let
-      # them bypass the whitelist. Keep false for "only these categories".
+      # World-Cup soccer + weather are carve-outs (see categorize.py) so we get
+      # them WITHOUT opening all of sports. (Anything outside the code ceiling
+      # is ignored anyway.)
+      allow: [macro, politics, crypto, worldcup, weather]
+      # Untagged markets could be ANY category (incl. other sports), so don't
+      # let them bypass the whitelist. Keep false for "only these categories".
       allow_uncategorized: false
 
   # 2. Wallet quality — production floor. Sharps below 50% win-rate on a
