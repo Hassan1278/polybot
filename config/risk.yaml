@@ -46,6 +46,10 @@ defaults:
     max_per_market_usdc: 25
     max_per_category_usdc: 400
     size_sigmoid_anchor: 0.6
+    # Hold at most ONE outcome per market — block the bot from buying both
+    # sides of the same event (a self-hedge that locks in a post-fee loss).
+    # Set false to allow opposing-outcome positions.
+    one_direction_per_market: true
 
   drawdown:
     max_daily_loss_usdc: 50

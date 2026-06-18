@@ -49,8 +49,36 @@ async def _spread_pct(token_id: str | None) -> float | None:
     return (best_ask - best_bid) / mid * 100.0
 
 
+async def _held_outcomes(s, *, mode: str, market_id: str) -> set[str]:
+    """Outcomes we currently have exposure to in ``market_id`` for ``mode``.
+
+    Paper tracks Position rows (a close zeroes ``size_shares``), so we read
+    live net holdings there. Live writes only Fill rows — there's no position
+    lifecycle on the live path yet — so a prior non-rejected live BUY on an
+    outcome counts as still-held. Returns upper-cased outcome labels.
+    """
+    if mode == "live":
+        rows = (await s.execute(
+            select(func.distinct(Fill.outcome)).where(
+                Fill.mode == "live",
+                Fill.market_id == market_id,
+                Fill.side == "BUY",
+                Fill.status.in_(("filled", "submitted", "partial")),
+            )
+        )).scalars().all()
+    else:
+        rows = (await s.execute(
+            select(func.distinct(Position.outcome)).where(
+                Position.market_id == market_id,
+                func.abs(Position.size_shares) > 0,
+            )
+        )).scalars().all()
+    return {str(o).upper() for o in rows if o}
+
+
 async def preflight(*, mode: str, market_id: str, category: str | None,
-                    side: str, size_usdc: float, score: float) -> dict:
+                    side: str, size_usdc: float, score: float,
+                    outcome: str | None = None) -> dict:
     """Returns {"ok": True, ...} or raises RiskRejection.
 
     `mode` (paper|live) is the caller's declared mode (executor's
@@ -59,7 +87,15 @@ async def preflight(*, mode: str, market_id: str, category: str | None,
     — without restarting the executor. Risk config is also per-mode
     merged so live mode's tighter caps apply when the runtime mode is
     "live".
+
+    `outcome` enables the one-direction-per-market guard (skipped when None,
+    e.g. legacy/test callers).
     """
+    # Caller's declared exec mode (paper|live) — decides which ledger we check
+    # for existing exposure below. `mode` itself gets overwritten by the
+    # runtime override just below (that override is for cap selection), so
+    # capture it first.
+    order_mode = mode
     runtime_mode = await current_mode()
     if runtime_mode != mode:
         # Runtime override (dashboard flip) supersedes the boot-time mode.
@@ -98,6 +134,18 @@ async def preflight(*, mode: str, market_id: str, category: str | None,
 
     # 3) per-market cap — sum absolute notional exposure on this market.
     async with session_scope() as s:
+        # One-direction-per-market: refuse the OPPOSITE outcome of a market we
+        # already hold. Mirroring smart money can fire BUY YES *and* BUY NO on
+        # the same event; taking both hedges the bot into a guaranteed
+        # post-fee loss. We hold at most ONE outcome per market. Disable with
+        # position.one_direction_per_market: false.
+        if outcome and pos_cfg.get("one_direction_per_market", True):
+            want = outcome.upper()
+            held = await _held_outcomes(s, mode=order_mode, market_id=market_id)
+            if any(o != want for o in held):
+                raise RiskRejection(
+                    f"opposing_outcome:{market_id[:14]}:have={sorted(held)}:want={want}")
+
         existing = (await s.execute(
             select(func.coalesce(
                 func.sum(func.abs(Position.size_shares) * Position.avg_price), 0.0))

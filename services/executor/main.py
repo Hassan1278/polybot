@@ -120,7 +120,8 @@ async def handle(sig: dict) -> None:
 
             try:
                 await preflight(mode=exec_mode, market_id=market_id,
-                                category=category, side=side, size_usdc=size_usdc, score=score)
+                                category=category, side=side, size_usdc=size_usdc,
+                                score=score, outcome=outcome)
             except RiskRejection as rej:
                 log.warning("risk_rejected", signal=sid, mode=exec_mode, reason=str(rej))
                 async with session_scope() as s:
