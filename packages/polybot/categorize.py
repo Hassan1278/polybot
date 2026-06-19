@@ -108,6 +108,12 @@ def _match(tokens: set[str], text: str, words: set[str], phrases: tuple[str, ...
 # forces "unclassified" (-> blocked by the category gate). Extend as needed.
 _EXCLUDE_KW = ("tweet", "tweets")
 
+# Dedicated novelty tag-buckets Polymarket uses that we never want to trade,
+# even when the market ALSO carries a legit tag like `politics` (the tweet-count
+# markets are tagged BOTH `politics` and `tweets-markets`). Any of these tags
+# forces the market unclassified -> blocked by the category gate.
+_EXCLUDE_TAGS = {"tweets-markets"}
+
 
 def _excluded(question: str | None, slug: str | None) -> bool:
     text = f"{question or ''} {slug or ''}".lower()
@@ -142,8 +148,11 @@ def classify_market(
     """Full classification. ``tag_map`` is category -> [tag-slugs] (already
     filtered to enabled categories by the caller)."""
     # Novelty exclusion wins over EVERYTHING (tags included) — these slip in via
-    # broad tags, so block them up front.
+    # broad tags (e.g. tweet markets tagged `politics`), so block them up front
+    # by content keyword OR by a dedicated novelty tag.
     if _excluded(question, slug):
+        return None
+    if tags and _EXCLUDE_TAGS.intersection(str(t).lower() for t in tags):
         return None
     text = f"{question or ''} {slug or ''}".lower().strip()
     tokens = set(_TOKEN_RE.findall(text)) if text else set()
