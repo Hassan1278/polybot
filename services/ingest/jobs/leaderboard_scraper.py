@@ -41,8 +41,13 @@ from polybot.runtime_config import merged_categories
 log = get_logger(__name__)
 
 MARKETS_TO_SCAN = 80
+# Also scan the top markets WITHIN each enabled category, so a category that's
+# quiet on global volume (e.g. crypto during World Cup season) still gets its
+# markets scanned and its sharps discovered. Without this the candidate pool
+# skews entirely to whatever's hot and quieter categories starve.
+MARKETS_PER_CATEGORY = 40
 TRADES_PER_MARKET = 500
-MAX_CANDIDATES = 800
+MAX_CANDIDATES = 1200
 PER_WALLET_DELAY = 0.05
 MIN_REALIZED_DECISIONS = 5
 MIN_REALIZED_PNL_USDC = 50.0   # at least $50 of realised PnL to be considered
@@ -53,14 +58,35 @@ async def _market_category_map(s) -> dict[str, str | None]:
     return {mid: cat for mid, cat in rows}
 
 
-async def _top_markets(s) -> list[str]:
+async def _top_markets(s, enabled_cats: list[str]) -> list[str]:
+    """Unresolved markets to scan for candidate wallets: a GLOBAL top-by-volume
+    slice (breadth) UNION the top-by-volume slice WITHIN each enabled category
+    (guarantees every category is represented even when one dominates global
+    volume). Deduplicated.
+    """
+    mids: set[str] = set()
+
+    # Global breadth — the busiest markets overall.
     rows = (await s.execute(
         select(Market.market_id)
         .where(Market.resolved.is_(False))
         .order_by(desc(Market.volume_24h_usdc))
         .limit(MARKETS_TO_SCAN)
     )).all()
-    return [r[0] for r in rows]
+    mids.update(r[0] for r in rows)
+
+    # Per-category guarantee — top markets inside each enabled category, so
+    # crypto/macro/politics get scanned regardless of World-Cup/sports volume.
+    for cat in enabled_cats:
+        rows = (await s.execute(
+            select(Market.market_id)
+            .where(Market.resolved.is_(False), Market.category == cat)
+            .order_by(desc(Market.volume_24h_usdc))
+            .limit(MARKETS_PER_CATEGORY)
+        )).all()
+        mids.update(r[0] for r in rows)
+
+    return list(mids)
 
 
 async def _collect_candidates(d: DataClient, market_ids: list[str]) -> dict[str, float]:
@@ -174,7 +200,7 @@ async def run_leaderboard() -> None:
     try:
         async with session_scope() as s:
             mkt_cat = await _market_category_map(s)
-            top_mids = await _top_markets(s)
+            top_mids = await _top_markets(s, list(enabled_cats.keys()))
         if not top_mids:
             log.warning("leaderboard_no_markets")
             return
