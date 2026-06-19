@@ -81,6 +81,13 @@ class Settings(BaseSettings):
     correlation_window_minutes: int = 15
     correlation_min_wallets: int = 3
     correlation_min_score: float = 0.65
+    # Slow-category correlation: crypto/politics/macro/weather agree over HOURS,
+    # not 15-min bursts, so they get a wider window + slower time-decay. Sports
+    # keeps the tight `correlation_window_minutes` above (live-game bursts).
+    # Without this, slow categories never reach min_wallets inside 15 min and
+    # never fire — which is exactly why crypto produced zero signals.
+    correlation_window_minutes_slow: int = 240
+    correlation_half_life_seconds_slow: float = 5400.0  # 90-min decay
 
     # integrations
     sentry_dsn: str | None = None

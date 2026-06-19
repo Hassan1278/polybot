@@ -15,7 +15,7 @@ from sqlalchemy import and_, select
 from polybot.config import settings
 from polybot.db import session_scope
 from polybot.logging import get_logger
-from polybot.models import Trade, Wallet
+from polybot.models import Market, Trade, Wallet
 from polybot.redis_bus import publish, subscribe
 from services.signals.engine import process_candidate
 from services.signals.strategies import load_strategy
@@ -166,18 +166,40 @@ async def correlation_loop(beacon=None) -> None:
         if beacon is not None:
             beacon.heartbeat()
 
-        df = await _recent_trades_df(settings.correlation_window_minutes)
+        # Fetch the WIDEST window (slow bucket) so per-category clustering in
+        # the strategy has the data it needs; the fast bucket re-filters to
+        # its tight window internally.
+        fetch_window = max(settings.correlation_window_minutes,
+                           settings.correlation_window_minutes_slow)
+        df = await _recent_trades_df(fetch_window)
         trade_count = 0 if df.empty else len(df)
         hb_trades_seen += trade_count
         hb_passes += 1
 
+        # market_id -> category, so the strategy can apply slow vs fast windows.
+        cat_map: dict[str, str | None] = {}
+        if not df.empty:
+            mids = [str(m) for m in df["market_id"].unique().tolist()]
+            try:
+                async with session_scope() as s:
+                    rows = (await s.execute(
+                        select(Market.market_id, Market.category)
+                        .where(Market.market_id.in_(mids))
+                    )).all()
+                cat_map = {m: c for m, c in rows}
+            except Exception:  # noqa: BLE001
+                log.exception("correlation_cat_map_failed")
+
         cands_typed = await strategy.generate_candidates(
             df,
             window_minutes=settings.correlation_window_minutes,
+            slow_window_minutes=settings.correlation_window_minutes_slow,
             min_wallets=settings.correlation_min_wallets,
             half_life_seconds=half_life_seconds,
+            slow_half_life_seconds=settings.correlation_half_life_seconds_slow,
             k_wallets=k_wallets,
             k_notional=k_notional,
+            market_category=cat_map,
         )
         # Engine still consumes dicts; serialise once here so process_candidate
         # and the candidate:new Redis publish see the same legacy shape.
