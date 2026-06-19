@@ -105,3 +105,71 @@ def direction(question: str | None, slug: str | None,
     if (side or "").strip().upper() == "SELL":
         bull = not bull
     return "bull" if bull else "bear"
+
+
+# --- Range / volatility markets ("between $A and $B") ----------------------
+# A range market has no bull/bear direction — it's a volatility bet:
+#   YES between $A-$B  -> price PINS inside the band   (stance "in")
+#   NO  between $A-$B  -> price BREAKS OUT of the band (stance "out")
+# Holding both stances on the SAME asset+band is the two-sided bet we avoid, so
+# we expose the band + stance for the per-asset guard (separate axis from
+# bull/bear — a directional bet and a range bet don't conflict with each other).
+
+_BETWEEN_RE = re.compile(
+    r"between\s*\$?\s*([\d,]+(?:\.\d+)?)\s*([km])?\s*(?:and|to|-|–|&)\s*"
+    r"\$?\s*([\d,]+(?:\.\d+)?)\s*([km])?",
+    re.I,
+)
+
+
+def _to_number(num: str, suffix: str | None) -> float | None:
+    try:
+        val = float(str(num).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+    s = (suffix or "").lower()
+    if s == "k":
+        val *= 1_000
+    elif s == "m":
+        val *= 1_000_000
+    return val
+
+
+def range_bet(question: str | None, slug: str | None,
+              outcome: str | None, side: str | None) -> tuple[str, float, float] | None:
+    """For a 'between $A and $B' range market, return (stance, low, high):
+    stance 'in' (YES pins in band) or 'out' (NO breaks out); SELL flips. None if
+    it isn't a parseable range market."""
+    text = f"{question or ''} {slug or ''}".lower()
+    m = _BETWEEN_RE.search(text)
+    if not m:
+        return None
+    low = _to_number(m.group(1), m.group(2))
+    high = _to_number(m.group(3), m.group(4))
+    if low is None or high is None:
+        return None
+    if low > high:
+        low, high = high, low
+    o = (outcome or "").strip().upper()
+    if o == "YES":
+        stance = "in"
+    elif o == "NO":
+        stance = "out"
+    else:
+        return None
+    if (side or "").strip().upper() == "SELL":
+        stance = "out" if stance == "in" else "in"
+    return (stance, low, high)
+
+
+def same_bracket(a: tuple[str, float, float], b: tuple[str, float, float],
+                 *, tol: float = 0.005) -> bool:
+    """True if two range bets cover the same price band (endpoints within `tol`
+    relative tolerance) — so daily reissues of one band match across dates."""
+    _, alo, ahi = a
+    _, blo, bhi = b
+
+    def close(x: float, y: float) -> bool:
+        return abs(x - y) <= tol * max(abs(x), abs(y), 1.0)
+
+    return close(alo, blo) and close(ahi, bhi)

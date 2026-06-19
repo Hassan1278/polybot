@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, func, select
 
-from polybot.asset_direction import asset_of, direction
+from polybot.asset_direction import asset_of, direction, range_bet, same_bracket
 from polybot.clients import ClobClient
 from polybot.db import session_scope
 from polybot.logging import get_logger
@@ -105,8 +105,9 @@ async def _asset_conflict(s, *, mode: str, market_id: str,
     asset = asset_of(q, slug)
     if asset is None:
         return None
-    want = direction(q, slug, outcome, side)
-    if want is None:
+    want_dir = direction(q, slug, outcome, side)        # bull / bear / None
+    want_rng = range_bet(q, slug, outcome, side)        # (stance, lo, hi) / None
+    if want_dir is None and want_rng is None:
         return None
 
     now = datetime.now(tz=timezone.utc)
@@ -114,7 +115,8 @@ async def _asset_conflict(s, *, mode: str, market_id: str,
         # Live path is long-only and writes only Fill rows; a non-rejected BUY
         # on an open crypto market counts as still-held exposure.
         rows = (await s.execute(
-            select(Market.question, Market.slug, Fill.outcome, Fill.side)
+            select(Fill.market_id, Market.question, Market.slug, Fill.outcome,
+                   Fill.side, Fill.notional_usdc)
             .join(Market, Market.market_id == Fill.market_id)
             .where(
                 Fill.mode == "live",
@@ -122,29 +124,58 @@ async def _asset_conflict(s, *, mode: str, market_id: str,
                 Fill.status.in_(("filled", "submitted", "partial")),
                 Market.category == "crypto",
                 Market.end_date > now,
-                Market.market_id != market_id,
             )
         )).all()
-        held = [(hq, hs, ho, hsd) for (hq, hs, ho, hsd) in rows]
+        held = [(hmid, hq, hs, ho, hsd, float(hn or 0.0))
+                for (hmid, hq, hs, ho, hsd, hn) in rows]
     else:
         rows = (await s.execute(
-            select(Market.question, Market.slug, Position.outcome)
+            select(Position.market_id, Market.question, Market.slug,
+                   Position.outcome, func.abs(Position.size_shares) * Position.avg_price)
             .join(Market, Market.market_id == Position.market_id)
             .where(
                 func.abs(Position.size_shares) > 0,
                 Market.category == "crypto",
                 Market.end_date > now,
-                Market.market_id != market_id,
             )
         )).all()
-        held = [(hq, hs, ho, "BUY") for (hq, hs, ho) in rows]
+        held = [(hmid, hq, hs, ho, "BUY", float(hn or 0.0))
+                for (hmid, hq, hs, ho, hn) in rows]
 
-    for hq, hs, ho, hsd in held:
-        if asset_of(hq, hs) != asset:
-            continue
-        have = direction(hq, hs, ho, hsd)
-        if have is not None and have != want:
-            return asset, want
+    # Directional axis (bull/bear) — STRICT: any open opposite-direction leg on
+    # the same asset (in a different market) is a conflict. Same-market opposite
+    # outcomes are handled earlier by the one-direction-per-market guard.
+    if want_dir is not None:
+        for hmid, hq, hs, ho, hsd, _hn in held:
+            if hmid == market_id:
+                continue
+            if asset_of(hq, hs) != asset:
+                continue
+            have = direction(hq, hs, ho, hsd)
+            if have is not None and have != want_dir:
+                return asset, want_dir
+
+    # Range axis ("between $A-$B") — MAJORITY-WINS: the stance we've committed
+    # the most open notional to on a band keeps trading; only the minority
+    # opposite stance is blocked. So an aggressive one-sided ladder stays alive
+    # while the contradicting side is refused. (Same-market legs are counted —
+    # they ARE our commitment to that side.)
+    if want_rng is not None:
+        same_usdc = 0.0
+        opp_usdc = 0.0
+        for _hmid, hq, hs, ho, hsd, hn in held:
+            if asset_of(hq, hs) != asset:
+                continue
+            hr = range_bet(hq, hs, ho, hsd)
+            if hr is None or not same_bracket(hr, want_rng):
+                continue
+            if hr[0] == want_rng[0]:
+                same_usdc += hn
+            else:
+                opp_usdc += hn
+        if opp_usdc > same_usdc:
+            return asset, f"range_{want_rng[0]}"
+
     return None
 
 
