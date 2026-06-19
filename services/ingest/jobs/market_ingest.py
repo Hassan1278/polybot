@@ -13,6 +13,7 @@ from polybot.categorize import classify_market
 from polybot.clients import GammaClient
 from polybot.db import session_scope
 from polybot.logging import get_logger
+from polybot.market_resolver import event_id_from_gamma
 from polybot.models import Market
 
 log = get_logger(__name__)
@@ -97,6 +98,7 @@ async def run_market_ingest() -> None:
                         slug=m.get("slug") or "",
                         question=m.get("question") or "",
                         category=cat,
+                        event_id=event_id_from_gamma(m),
                         end_date=end_dt,
                         resolved=bool(m.get("closed")),
                         outcome=m.get("outcome"),
@@ -111,6 +113,12 @@ async def run_market_ingest() -> None:
                         set_={"liquidity_usdc": pg_insert(Market).excluded.liquidity_usdc,
                               "volume_24h_usdc": pg_insert(Market).excluded.volume_24h_usdc,
                               "category": pg_insert(Market).excluded.category,
+                              # Keep an existing event_id if a later pass lacks
+                              # events[] (closed-market re-ingest etc.).
+                              "event_id": sa.func.coalesce(
+                                  pg_insert(Market).excluded.event_id,
+                                  Market.event_id,
+                              ),
                               "resolved": pg_insert(Market).excluded.resolved,
                               "outcome": pg_insert(Market).excluded.outcome,
                               # Don't overwrite outcomes with NULL on update —

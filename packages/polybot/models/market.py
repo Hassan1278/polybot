@@ -17,6 +17,12 @@ class Market(Base):
     slug: Mapped[str] = mapped_column(String(256), index=True)
     question: Mapped[str] = mapped_column(Text)
     category: Mapped[str | None] = mapped_column(String(64), index=True)
+    # Parent Polymarket event id — groups sibling markets (all candidates in one
+    # election, both teams of one match, ...). Populated from Gamma's events[]
+    # by both the bulk ingest and the JIT resolver. Drives the
+    # one-position-per-event risk guard. Nullable: markets with no parent event
+    # (or rows not yet re-ingested) stay NULL and the guard skips them.
+    event_id: Mapped[str | None] = mapped_column(String(80), index=True)
     end_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     resolved: Mapped[bool] = mapped_column(Boolean, default=False)
     outcome: Mapped[str | None] = mapped_column(String(32))

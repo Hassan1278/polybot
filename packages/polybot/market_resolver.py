@@ -48,6 +48,20 @@ def _parse_json_list(raw: Any) -> list[str]:
     return []
 
 
+def event_id_from_gamma(m: dict[str, Any]) -> str | None:
+    """Stable identifier for a market's parent event, for one-position-per-event
+    grouping. Prefers the event's numeric id, falls back to slug then ticker.
+    Returns None when the market has no parent event. Shared by the bulk ingest
+    and this JIT resolver so the two write-paths can't drift."""
+    for ev in (m.get("events") or []):
+        if not isinstance(ev, dict):
+            continue
+        ident = ev.get("id") or ev.get("slug") or ev.get("ticker")
+        if ident:
+            return str(ident)[:80]
+    return None
+
+
 def token_for_outcome(market: Any, outcome: str | None) -> str | None:
     """Map (market, outcome_string) → the correct CLOB token_id.
 
@@ -177,6 +191,7 @@ async def ensure_market(market_id: str) -> Market | None:
             slug=m.get("slug") or "",
             question=m.get("question") or "",
             category=cat,
+            event_id=event_id_from_gamma(m),
             end_date=end_dt,
             resolved=bool(m.get("closed")),
             outcome=m.get("outcome"),

@@ -58,6 +58,13 @@ defaults:
     # Direction inference is precision-biased (fails open when ambiguous).
     # Set false to disable.
     one_direction_per_asset: true
+    # Hold at most ONE market per Polymarket EVENT. Sibling markets of one
+    # event (all candidates in a primary, both sides of a match, ...) can be
+    # mutually exclusive, so taking several is an implicit two-sided bet — e.g.
+    # NO on two frontrunners in the same NY-12 primary. The first market entered
+    # in an event wins; its still-open siblings are blocked. Markets with no
+    # parent event are unaffected. Set false to disable.
+    one_position_per_event: true
 
   drawdown:
     max_daily_loss_usdc: 50

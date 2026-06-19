@@ -148,6 +148,45 @@ async def _asset_conflict(s, *, mode: str, market_id: str,
     return None
 
 
+async def _event_already_held(s, *, mode: str, market_id: str,
+                              event_id: str) -> str | None:
+    """One-position-per-event check.
+
+    Return the market_id of an OPEN position in a DIFFERENT market of the same
+    Polymarket event, or None. Lets the bot hold at most one market per event
+    so it can't take multiple (often offsetting) positions on the same
+    underlying — e.g. NO on two frontrunners in one primary. Only still-open
+    sibling markets (``end_date`` in the future) count, so a resolved sibling
+    never blocks a fresh, unrelated entry.
+    """
+    now = datetime.now(tz=timezone.utc)
+    if mode == "live":
+        row = (await s.execute(
+            select(Fill.market_id)
+            .join(Market, Market.market_id == Fill.market_id)
+            .where(
+                Fill.mode == "live",
+                Fill.side == "BUY",
+                Fill.status.in_(("filled", "submitted", "partial")),
+                Market.event_id == event_id,
+                Market.market_id != market_id,
+                Market.end_date > now,
+            ).limit(1)
+        )).first()
+    else:
+        row = (await s.execute(
+            select(Position.market_id)
+            .join(Market, Market.market_id == Position.market_id)
+            .where(
+                func.abs(Position.size_shares) > 0,
+                Market.event_id == event_id,
+                Market.market_id != market_id,
+                Market.end_date > now,
+            ).limit(1)
+        )).first()
+    return row[0] if row else None
+
+
 async def preflight(*, mode: str, market_id: str, category: str | None,
                     side: str, size_usdc: float, score: float,
                     outcome: str | None = None) -> dict:
@@ -236,6 +275,32 @@ async def preflight(*, mode: str, market_id: str, category: str | None,
             if conflict:
                 asset, want_dir = conflict
                 raise RiskRejection(f"asset_conflict:{asset}:want={want_dir}")
+
+        # One-position-per-EVENT: hold at most ONE market per Polymarket event,
+        # so the bot can't take multiple (often offsetting) positions on the
+        # same underlying event — e.g. "NO on Bores" + "NO on Lasher" in one
+        # NY-12 primary. The first market entered in an event wins; its open
+        # siblings are blocked. Fail-OPEN on any error. Markets with no parent
+        # event (event_id NULL) are unaffected. Disable with
+        # position.one_position_per_event: false.
+        if outcome and pos_cfg.get("one_position_per_event", True):
+            try:
+                ev_row = (await s.execute(
+                    select(Market.event_id).where(Market.market_id == market_id)
+                )).first()
+                event_id = ev_row[0] if ev_row else None
+                held_mid = (
+                    await _event_already_held(
+                        s, mode=order_mode, market_id=market_id, event_id=event_id)
+                    if event_id else None
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning("event_conflict_check_failed",
+                            market_id=market_id, err=str(exc))
+                held_mid = None
+            if held_mid:
+                raise RiskRejection(
+                    f"event_conflict:{str(event_id)[:18]}:held={held_mid[:12]}")
 
         existing = (await s.execute(
             select(func.coalesce(
