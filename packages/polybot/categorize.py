@@ -102,9 +102,23 @@ def _match(tokens: set[str], text: str, words: set[str], phrases: tuple[str, ...
     return bool(tokens & words) or any(p in text for p in phrases)
 
 
+# Novelty / low-information markets we never want to trade, regardless of how
+# they're tagged — they slip into a tradable category via a broad tag (e.g. a
+# market tagged "world" mapping to politics). A question/slug substring match
+# forces "unclassified" (-> blocked by the category gate). Extend as needed.
+_EXCLUDE_KW = ("tweet", "tweets")
+
+
+def _excluded(question: str | None, slug: str | None) -> bool:
+    text = f"{question or ''} {slug or ''}".lower()
+    return any(k in text for k in _EXCLUDE_KW)
+
+
 def classify_keywords(question: str | None, slug: str | None) -> str | None:
     """Keyword-only classification: carve-outs first, then core categories.
     Used by the backfill (no tags stored — only question + slug)."""
+    if _excluded(question, slug):
+        return None
     text = f"{question or ''} {slug or ''}".lower().strip()
     if not text:
         return None
@@ -127,6 +141,10 @@ def classify_market(
 ) -> str | None:
     """Full classification. ``tag_map`` is category -> [tag-slugs] (already
     filtered to enabled categories by the caller)."""
+    # Novelty exclusion wins over EVERYTHING (tags included) — these slip in via
+    # broad tags, so block them up front.
+    if _excluded(question, slug):
+        return None
     text = f"{question or ''} {slug or ''}".lower().strip()
     tokens = set(_TOKEN_RE.findall(text)) if text else set()
 
