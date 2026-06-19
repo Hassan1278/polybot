@@ -44,10 +44,11 @@ MARKETS_TO_SCAN = 80
 # Also scan the top markets WITHIN each enabled category, so a category that's
 # quiet on global volume (e.g. crypto during World Cup season) still gets its
 # markets scanned and its sharps discovered. Without this the candidate pool
-# skews entirely to whatever's hot and quieter categories starve.
-MARKETS_PER_CATEGORY = 40
+# skews entirely to whatever's hot and quieter categories starve. 80 per
+# category surfaces a deep crypto/politics roster regardless of sports volume.
+MARKETS_PER_CATEGORY = 80
 TRADES_PER_MARKET = 500
-MAX_CANDIDATES = 1200
+MAX_CANDIDATES = 1500
 PER_WALLET_DELAY = 0.05
 MIN_REALIZED_DECISIONS = 5
 MIN_REALIZED_PNL_USDC = 50.0   # at least $50 of realised PnL to be considered
