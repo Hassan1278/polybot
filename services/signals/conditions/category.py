@@ -12,7 +12,7 @@ from services.signals.conditions.base import GateContext, GateResult
 # categorize.py) so we trade those WITHOUT opening all of sports.
 # To change the permitted universe, edit THIS set (and rebuild the signals svc).
 HARD_ALLOWED_CATEGORIES = {
-    "macro", "politics", "crypto", "weather", "worldcup",
+    "macro", "politics", "crypto", "weather",
     "sports_major", "sports_other",
 }
 
