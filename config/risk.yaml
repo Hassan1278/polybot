@@ -50,6 +50,14 @@ defaults:
     # sides of the same event (a self-hedge that locks in a post-fee loss).
     # Set false to allow opposing-outcome positions.
     one_direction_per_market: true
+    # Hold at most ONE price direction per underlying CRYPTO asset across
+    # markets. Blocks contradictory bets like an open "BTC up daily" while a
+    # new order is "BTC below $X" — keeps the book uniformly one-sided per
+    # asset. Only OPEN markets constrain new orders, so daily BTC up/down still
+    # trades day-to-day; only simultaneous both-sided exposure is refused.
+    # Direction inference is precision-biased (fails open when ambiguous).
+    # Set false to disable.
+    one_direction_per_asset: true
 
   drawdown:
     max_daily_loss_usdc: 50

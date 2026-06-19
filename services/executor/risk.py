@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, func, select
 
+from polybot.asset_direction import asset_of, direction
 from polybot.clients import ClobClient
 from polybot.db import session_scope
 from polybot.logging import get_logger
@@ -74,6 +75,77 @@ async def _held_outcomes(s, *, mode: str, market_id: str) -> set[str]:
             )
         )).scalars().all()
     return {str(o).upper() for o in rows if o}
+
+
+async def _asset_conflict(s, *, mode: str, market_id: str,
+                          outcome: str, side: str) -> tuple[str, str] | None:
+    """One-sided-per-asset check.
+
+    Return ``(asset, want_dir)`` if placing this order would put us on the
+    OPPOSITE price direction of a still-open position on the same underlying
+    crypto asset (e.g. an open "BTC up" bet while this order is "BTC below
+    $X"); otherwise None.
+
+    Best-effort and PRECISION-biased: returns None on any ambiguity (non-crypto
+    market, unparseable asset/direction) so the caller fails open. Only markets
+    that are still OPEN (``end_date`` in the future) constrain new orders — once
+    a daily market resolves it stops blocking the next day's fresh bet, so daily
+    BTC up/down keeps trading day-to-day; we only forbid holding both sides at
+    the same time.
+    """
+    row = (await s.execute(
+        select(Market.question, Market.slug, Market.category)
+        .where(Market.market_id == market_id)
+    )).first()
+    if not row:
+        return None
+    q, slug, cat = row
+    if str(cat or "").lower() != "crypto":
+        return None
+    asset = asset_of(q, slug)
+    if asset is None:
+        return None
+    want = direction(q, slug, outcome, side)
+    if want is None:
+        return None
+
+    now = datetime.now(tz=timezone.utc)
+    if mode == "live":
+        # Live path is long-only and writes only Fill rows; a non-rejected BUY
+        # on an open crypto market counts as still-held exposure.
+        rows = (await s.execute(
+            select(Market.question, Market.slug, Fill.outcome, Fill.side)
+            .join(Market, Market.market_id == Fill.market_id)
+            .where(
+                Fill.mode == "live",
+                Fill.side == "BUY",
+                Fill.status.in_(("filled", "submitted", "partial")),
+                Market.category == "crypto",
+                Market.end_date > now,
+                Market.market_id != market_id,
+            )
+        )).all()
+        held = [(hq, hs, ho, hsd) for (hq, hs, ho, hsd) in rows]
+    else:
+        rows = (await s.execute(
+            select(Market.question, Market.slug, Position.outcome)
+            .join(Market, Market.market_id == Position.market_id)
+            .where(
+                func.abs(Position.size_shares) > 0,
+                Market.category == "crypto",
+                Market.end_date > now,
+                Market.market_id != market_id,
+            )
+        )).all()
+        held = [(hq, hs, ho, "BUY") for (hq, hs, ho) in rows]
+
+    for hq, hs, ho, hsd in held:
+        if asset_of(hq, hs) != asset:
+            continue
+        have = direction(hq, hs, ho, hsd)
+        if have is not None and have != want:
+            return asset, want
+    return None
 
 
 async def preflight(*, mode: str, market_id: str, category: str | None,
@@ -145,6 +217,25 @@ async def preflight(*, mode: str, market_id: str, category: str | None,
             if any(o != want for o in held):
                 raise RiskRejection(
                     f"opposing_outcome:{market_id[:14]}:have={sorted(held)}:want={want}")
+
+        # One-direction-per-ASSET: refuse a bet that contradicts an open
+        # position on the same underlying crypto asset across DIFFERENT
+        # markets (e.g. open "BTC up daily" + new "BTC below $X"). Keeps the
+        # book uniformly one-sided per asset. Fail-OPEN on any error so a parse
+        # bug can never wedge the executor. Disable with
+        # position.one_direction_per_asset: false.
+        if outcome and pos_cfg.get("one_direction_per_asset", True):
+            try:
+                conflict = await _asset_conflict(
+                    s, mode=order_mode, market_id=market_id,
+                    outcome=outcome, side=side)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("asset_conflict_check_failed",
+                            market_id=market_id, err=str(exc))
+                conflict = None
+            if conflict:
+                asset, want_dir = conflict
+                raise RiskRejection(f"asset_conflict:{asset}:want={want_dir}")
 
         existing = (await s.execute(
             select(func.coalesce(
