@@ -102,10 +102,6 @@ gates:
     enabled: true
     params:
       min_hours_to_resolve: 0.25
-      # Edge categories (crypto/politics/macro/weather) only — require >=48h so
-      # daily coinflips (BTC up/down, "above $X today") are filtered while
-      # multi-day theses pass. Sports/worldcup keep the 0.25h floor above.
-      min_hours_to_resolve_slow: 48
       max_hours_to_resolve: 720       # 30 days
 
   # 6. Correlation strength — require a meaningful cluster of sharps,
