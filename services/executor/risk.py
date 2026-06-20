@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import and_, func, select
 
-from polybot.asset_direction import asset_of, direction, range_bet, same_bracket
+from polybot.asset_direction import CRYPTO_MAJORS, asset_of, direction, range_bet, same_bracket
 from polybot.clients import ClobClient
 from polybot.db import session_scope
 from polybot.logging import get_logger
@@ -179,6 +179,92 @@ async def _asset_conflict(s, *, mode: str, market_id: str,
     return None
 
 
+async def _crypto_timeframe_conflict(s, *, mode: str, market_id: str,
+                                     outcome: str, side: str) -> tuple[str, str, str, str] | None:
+    """Cross-asset directional consistency among correlated crypto MAJORS,
+    bucketed by resolution DAY (UTC).
+
+    Crypto majors move together, so an open "BTC down today" while a new order is
+    "ETH up today" is a self-cancelling thesis (one signal is almost certainly
+    noise). Return ``(asset, want_dir, have_asset, day)`` if this order's
+    direction OPPOSES an already-open major-crypto leg resolving the SAME UTC day;
+    otherwise None.
+
+    Like ``_asset_conflict`` this is best-effort and PRECISION-biased: it returns
+    None on any ambiguity (non-crypto, non-major, unparseable direction, missing
+    end_date) so the caller fails open. Only still-OPEN markets (``end_date`` in
+    the future) constrain new orders, and only legs resolving the same calendar
+    day count — so day-to-day directional bets keep trading; we only forbid
+    holding opposing directions across majors within one day.
+    """
+    row = (await s.execute(
+        select(Market.question, Market.slug, Market.category, Market.end_date)
+        .where(Market.market_id == market_id)
+    )).first()
+    if not row:
+        return None
+    q, slug, cat, end_date = row
+    if str(cat or "").lower() != "crypto" or end_date is None:
+        return None
+    asset = asset_of(q, slug)
+    if asset is None or asset not in CRYPTO_MAJORS:
+        return None
+    want_dir = direction(q, slug, outcome, side)        # bull / bear / None
+    if want_dir is None:
+        return None
+    if end_date.tzinfo is None:
+        end_date = end_date.replace(tzinfo=timezone.utc)
+    want_day = end_date.astimezone(timezone.utc).date()
+
+    now = datetime.now(tz=timezone.utc)
+    if mode == "live":
+        # Live path is long-only and writes only Fill rows; a non-rejected BUY on
+        # an open crypto market counts as still-held exposure.
+        rows = (await s.execute(
+            select(Market.question, Market.slug, Fill.outcome, Fill.side,
+                   Market.end_date, Fill.market_id)
+            .join(Market, Market.market_id == Fill.market_id)
+            .where(
+                Fill.mode == "live",
+                Fill.side == "BUY",
+                Fill.status.in_(("filled", "submitted", "partial")),
+                Market.category == "crypto",
+                Market.end_date > now,
+            )
+        )).all()
+        held = [(hq, hs, ho, hsd, hed, hmid)
+                for (hq, hs, ho, hsd, hed, hmid) in rows]
+    else:
+        rows = (await s.execute(
+            select(Market.question, Market.slug, Position.outcome,
+                   Market.end_date, Position.market_id)
+            .join(Market, Market.market_id == Position.market_id)
+            .where(
+                func.abs(Position.size_shares) > 0,
+                Market.category == "crypto",
+                Market.end_date > now,
+            )
+        )).all()
+        held = [(hq, hs, ho, "BUY", hed, hmid)
+                for (hq, hs, ho, hed, hmid) in rows]
+
+    for hq, hs, ho, hsd, hed, hmid in held:
+        if hmid == market_id:
+            continue                       # same market — one_direction_per_market handles it
+        h_asset = asset_of(hq, hs)
+        if h_asset is None or h_asset not in CRYPTO_MAJORS or hed is None:
+            continue
+        if hed.tzinfo is None:
+            hed = hed.replace(tzinfo=timezone.utc)
+        if hed.astimezone(timezone.utc).date() != want_day:
+            continue                       # different resolution day — separate book
+        have = direction(hq, hs, ho, hsd)
+        if have is not None and have != want_dir:
+            return asset, want_dir, h_asset, want_day.isoformat()
+
+    return None
+
+
 async def _event_already_held(s, *, mode: str, market_id: str,
                               event_id: str) -> str | None:
     """One-position-per-event check.
@@ -306,6 +392,27 @@ async def preflight(*, mode: str, market_id: str, category: str | None,
             if conflict:
                 asset, want_dir = conflict
                 raise RiskRejection(f"asset_conflict:{asset}:want={want_dir}")
+
+        # One-direction-per-CRYPTO-TIMEFRAME: among correlated majors (BTC/ETH/
+        # SOL/...) resolving the SAME UTC day, refuse a bet whose direction opposes
+        # an already-open major-crypto leg. Majors move together, so "BTC down
+        # today" + "ETH up today" is a self-cancelling thesis. Majors-only
+        # (memecoins exempt), day-bucketed so different horizons don't cross-block,
+        # and fail-OPEN on any error. Disable with
+        # position.one_direction_per_crypto_timeframe: false.
+        if outcome and pos_cfg.get("one_direction_per_crypto_timeframe", True):
+            try:
+                xconf = await _crypto_timeframe_conflict(
+                    s, mode=order_mode, market_id=market_id,
+                    outcome=outcome, side=side)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("crypto_timeframe_conflict_check_failed",
+                            market_id=market_id, err=str(exc))
+                xconf = None
+            if xconf:
+                asset, want_dir, have_asset, day = xconf
+                raise RiskRejection(
+                    f"crypto_timeframe_conflict:{asset}_{want_dir}_vs_{have_asset}:day={day}")
 
         # One-position-per-EVENT: hold at most ONE market per Polymarket event,
         # so the bot can't take multiple (often offsetting) positions on the

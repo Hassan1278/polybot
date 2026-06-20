@@ -58,6 +58,14 @@ defaults:
     # Direction inference is precision-biased (fails open when ambiguous).
     # Set false to disable.
     one_direction_per_asset: true
+    # Keep correlated crypto MAJORS (BTC/ETH/SOL + top L1s) one-directional within
+    # the SAME UTC resolution day. Blocks self-cancelling theses like an open
+    # "BTC down today" + a new "ETH up today" (majors move together, so one of the
+    # mirrored signals is almost certainly noise). Memecoins (DOGE/SHIB/PEPE) are
+    # exempt; different resolution days are separate books, so day-to-day
+    # directional bets keep trading. Precision-biased (fails open on ambiguous
+    # direction/asset). Set false to disable.
+    one_direction_per_crypto_timeframe: true
     # Hold at most ONE market per Polymarket EVENT. Sibling markets of one
     # event (all candidates in a primary, both sides of a match, ...) can be
     # mutually exclusive, so taking several is an implicit two-sided bet — e.g.

@@ -40,6 +40,15 @@ _ASSETS: dict[str, set[str]] = {
     "TRX": {"tron", "trx"},
 }
 
+# Correlated large caps the cross-asset directional guard treats as ONE book per
+# timeframe (see services/executor/risk.py:_crypto_timeframe_conflict). Memecoins
+# (DOGE/SHIB/PEPE) are excluded — they decouple from BTC often enough that forcing
+# a shared direction would wrongly block legitimate independent bets. Every entry
+# must be a key in _ASSETS above so asset_of() can actually return it.
+CRYPTO_MAJORS: frozenset[str] = frozenset({
+    "BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "AVAX", "DOT", "LINK", "LTC", "MATIC", "TRX",
+})
+
 # Bullish = a bet the price goes UP. Tokens matched whole; phrases as substrings.
 _BULL_WORDS = {
     "above", "over", "reach", "reaches", "reached", "hit", "hits", "exceed",
