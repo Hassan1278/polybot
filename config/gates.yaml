@@ -44,10 +44,12 @@ gates:
     type: hard
     enabled: true
     params:
-      # worldcup is still classified (categorize.py) but intentionally NOT
-      # listed here -> blocked. Add `worldcup` back here AND to HARD_ALLOWED to
-      # re-enable. weather stays as a carve-out.
-      allow: [macro, politics, crypto, weather, sports_major, sports_other]
+      # SPORTS POLICY: only MLB is tradable (operator request). sports_mlb is a
+      # categorize.py carve-out; sports_major/sports_other stay classified but
+      # are intentionally NOT listed here -> gate-blocked. To re-enable another
+      # sport, add its bucket here AND to HARD_ALLOWED_CATEGORIES. worldcup is
+      # likewise classified-but-blocked; weather stays as a carve-out.
+      allow: [macro, politics, crypto, weather, sports_mlb]
       # Untagged markets could be ANY category (incl. other sports), so don't
       # let them bypass the whitelist. Keep false for "only these categories".
       allow_uncategorized: false
@@ -117,9 +119,12 @@ gates:
       min_score: 0.05
       min_wallets: 2
       # Per-category confidence floors (override min_score for these buckets).
-      # Sports was our biggest live loser/noise, so re-enabled ONLY on strong
-      # clusters — sports must score >= 0.5; everything else keeps 0.05.
+      # Sports was our biggest live loser/noise, so MLB (the one tradable sport)
+      # fires ONLY on strong clusters — must score >= 0.5; everything else keeps
+      # 0.05. sports_major/sports_other are gate-blocked upstream (category_match)
+      # but keep their floors here in case a sport is re-enabled later.
       category_min_score:
+        sports_mlb: 0.5
         sports_major: 0.5
         sports_other: 0.5
 

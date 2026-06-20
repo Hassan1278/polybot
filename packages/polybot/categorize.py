@@ -33,6 +33,17 @@ _CARVEOUTS: dict[str, tuple[set[str], tuple[str, ...]]] = {
         ("highest temperature", "lowest temperature", "high temperature",
          "low temperature"),
     ),
+    # MLB baseball — the ONE sport we still trade (operator request: "disable
+    # all sports except MLB"). As a carve-out it's checked BEFORE tags, so an
+    # MLB market tagged generic `sports` still routes here (and stays allowed),
+    # while every other sport routes to sports_major/sports_other (gate-blocked).
+    # High-precision keys only — {mlb, baseball, "world series"} are unambiguous;
+    # team-name recall is handled lower down (sports_mlb in _KW) where it can't
+    # hijack a politics/crypto market.
+    "sports_mlb": (
+        {"mlb", "baseball"},
+        ("world series", "major league baseball"),
+    ),
 }
 
 # Core trading categories — keyword fallback (stage 2), checked only if no tag.
@@ -78,19 +89,39 @@ _KW: dict[str, tuple[set[str], tuple[str, ...]]] = {
             "basis points", "soft landing",
         ),
     ),
+    # MLB team-name recall booster. Reached only when no carve-out, no tag, and
+    # no politics/crypto/macro keyword matched — so a team name here is almost
+    # certainly an untagged MLB game (e.g. "Yankees vs Red Sox"). Routes to the
+    # SAME sports_mlb bucket as the carve-out, so it's ALLOWED. Only unambiguous,
+    # MLB-unique nicknames are listed: cross-sport names (Giants/Cardinals/
+    # Rangers/Angels/Athletics) and common English words (Royals/Nationals/
+    # Guardians/Reds/Tigers/...) are intentionally OMITTED so this can't leak an
+    # NFL/NHL game — or a monarchy market — into the one allowed sport. Add more
+    # teams here if real MLB games are being missed.
+    "sports_mlb": (
+        {
+            "yankees", "dodgers", "mets", "astros", "padres", "mariners",
+            "brewers", "marlins", "orioles", "phillies", "diamondbacks",
+            "dbacks", "rockies",
+        },
+        ("red sox", "white sox", "blue jays"),
+    ),
     # Low-priority catch-all for recognizable sports / esports — checked LAST
-    # so politics/crypto/macro always win a tie. Tag-based classification still
-    # produces sports_major for tagged majors; this recovers the untagged ones
-    # (your tag recall on sports was ~0). All sports get the same gate treatment.
+    # so politics/crypto/macro/sports_mlb always win a tie. Tag-based
+    # classification still produces sports_major for tagged majors; this recovers
+    # the untagged ones (tag recall on sports was ~0). Every sport EXCEPT MLB is
+    # gate-blocked (see gates.yaml allow-list), so these buckets stay classified
+    # purely so re-enabling a sport later is a one-line change. `mlb`/`baseball`/
+    # `world series` were moved up to sports_mlb.
     "sports_other": (
         {
-            "nfl", "nba", "nhl", "mlb", "ufc", "mma", "boxing", "tennis", "atp",
+            "nfl", "nba", "nhl", "ufc", "mma", "boxing", "tennis", "atp",
             "wta", "golf", "pga", "cricket", "rugby", "nascar", "esports", "cs2",
             "dota", "valorant",
         },
         (
             "counter-strike", "league of legends", "premier league",
-            "champions league", "super bowl", "world series", "stanley cup",
+            "champions league", "super bowl", "stanley cup",
             "grand slam", "formula 1", "grand prix", "la liga", "serie a",
             "bundesliga",
         ),

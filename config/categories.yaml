@@ -37,13 +37,28 @@ categories:
     top_n: 50
     min_win_rate: 0.55
 
-  # Major, liquid sports leagues — deep books, faster resolution, well-known sharps.
+  # MLB baseball — the ONLY sport currently in the gate allow-list (operator
+  # request: "disable all sports except MLB"). A carve-out in polybot/
+  # categorize.py routes MLB here even when tagged generic `sports`, so it stays
+  # tradable while every other sport is gate-blocked. enabled:true keeps these
+  # tags in the tag_map AND lets MLB sharps be discovered.
+  sports_mlb:
+    tags:
+      - mlb
+      - baseball
+    enabled: true
+    top_n: 30
+    min_win_rate: 0.55
+
+  # Major, liquid sports leagues — deep books, faster resolution, well-known
+  # sharps. Still CLASSIFIED so re-enabling is a one-line gate change, but
+  # currently gate-blocked (not in gates.yaml allow-list). `mlb` was moved out
+  # to its own sports_mlb bucket above.
   sports_major:
     tags:
       - nfl
       - nba
       - nhl
-      - mlb
       - champions-league
       - soccer-worldcup
       - formula-1

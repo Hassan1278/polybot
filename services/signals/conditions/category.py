@@ -8,12 +8,15 @@ from services.signals.conditions.base import GateContext, GateResult
 # Hard ceiling on what the bot may EVER bet. The YAML/Redis `allow` list can
 # NARROW within this set but can never broaden beyond it — a stray dashboard
 # toggle or Redis override can't re-enable other categories behind the
-# operator's back. `weather` and `worldcup` are deliberate carve-outs (see
-# categorize.py) so we trade those WITHOUT opening all of sports.
+# operator's back. `weather` and `sports_mlb` are deliberate carve-outs (see
+# categorize.py): we trade weather and MLB baseball WITHOUT opening all of
+# sports. sports_major/sports_other are intentionally OFF the ceiling (operator
+# request: "disable all sports except MLB") — re-add a bucket here AND to the
+# gates.yaml allow-list to re-enable it.
 # To change the permitted universe, edit THIS set (and rebuild the signals svc).
 HARD_ALLOWED_CATEGORIES = {
     "macro", "politics", "crypto", "weather",
-    "sports_major", "sports_other",
+    "sports_mlb",
 }
 
 
