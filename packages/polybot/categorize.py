@@ -145,10 +145,30 @@ _EXCLUDE_KW = ("tweet", "tweets")
 # forces the market unclassified -> blocked by the category gate.
 _EXCLUDE_TAGS = {"tweets-markets"}
 
+# Baseball that is NOT MLB. The operator runs an MLB-ONLY sports policy, but
+# Polymarket tags KBO/NPB/college games with the broad `baseball` tag and names
+# the NCAA final the "College World Series" — all of which the sports_mlb
+# carve-out/tag would otherwise claim. Force them unclassified (-> gate-blocked)
+# so ONLY Major League Baseball stays tradable. Every token here is
+# baseball-specific, so a substring match can't misfire on a non-baseball
+# market. Extend if another league slips through (e.g. Mexican LMB, winter ball).
+_NON_MLB_BASEBALL = (
+    "kbo",                      # Korea Baseball Organization
+    "npb",                      # Nippon Professional Baseball (Japan)
+    "nippon professional",
+    "college world series",     # NCAA
+    "world baseball classic",   # international (WBC)
+    "minor league",
+    "little league",
+)
+
 
 def _excluded(question: str | None, slug: str | None) -> bool:
+    """True -> force the market unclassified (gate-blocked): novelty markets we
+    never trade, plus non-MLB baseball leagues under the MLB-only sports policy."""
     text = f"{question or ''} {slug or ''}".lower()
-    return any(k in text for k in _EXCLUDE_KW)
+    return (any(k in text for k in _EXCLUDE_KW)
+            or any(k in text for k in _NON_MLB_BASEBALL))
 
 
 def classify_keywords(question: str | None, slug: str | None) -> str | None:

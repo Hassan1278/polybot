@@ -76,6 +76,29 @@ def test_common_word_team_names_excluded():
     assert cm(question="Guardians of the Galaxy box office record?", tags=None) != "sports_mlb"
 
 
+# ── Strict MLB: other baseball leagues are blocked, not just other sports ─────
+
+def test_non_mlb_baseball_leagues_blocked():
+    # Korean (KBO) and Japanese (NPB) pro baseball ride in on the `baseball`
+    # tag but are NOT Major League -> must NOT route to sports_mlb.
+    assert cm(question="KBO: Kia Tigers vs. KT Wiz", tags=["baseball"]) != "sports_mlb"
+    assert cm(question="NPB: Yomiuri Giants vs. Hanshin Tigers", tags=["baseball"]) != "sports_mlb"
+
+
+def test_college_and_amateur_baseball_blocked():
+    # "College World Series" matches the bare "world series" phrase but is NCAA,
+    # not MLB -> blocked.
+    assert cm(question="Will Oklahoma win the 2026 College World Series?", tags=None) != "sports_mlb"
+    assert cm(question="Little League World Series winner", tags=["baseball"]) != "sports_mlb"
+    assert cm(question="2026 World Baseball Classic champion", tags=["baseball"]) != "sports_mlb"
+
+
+def test_real_mlb_world_series_still_allowed():
+    # Regression guard: the strict-MLB veto must NOT block actual MLB markets.
+    assert cm(question="Will the Chicago Cubs win the 2026 World Series?", tags=None) == "sports_mlb"
+    assert cm(question="Yankees vs Red Sox", tags=["baseball"]) == "sports_mlb"
+
+
 # ── Non-sports categories unaffected ─────────────────────────────────────────
 
 def test_core_categories_unchanged():
