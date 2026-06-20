@@ -44,12 +44,15 @@ gates:
     type: hard
     enabled: true
     params:
-      # SPORTS POLICY: only MLB is tradable (operator request). sports_mlb is a
-      # categorize.py carve-out; sports_major/sports_other stay classified but
-      # are intentionally NOT listed here -> gate-blocked. To re-enable another
-      # sport, add its bucket here AND to HARD_ALLOWED_CATEGORIES. worldcup is
-      # likewise classified-but-blocked; weather stays as a carve-out.
-      allow: [macro, politics, crypto, weather, sports_mlb]
+      # SPORTS POLICY: NO sport is currently tradable. MLB was the lone exception
+      # but is now disabled (operator request) by removing sports_mlb from this
+      # allow-list and setting enabled:false in categories.yaml. This is a
+      # config-only change: sports_mlb is intentionally LEFT in
+      # HARD_ALLOWED_CATEGORIES (category.py) so no signals rebuild is needed.
+      # sports_major/sports_other remain classified-but-blocked. To re-enable a
+      # sport, add its bucket back here (and ensure it's in HARD_ALLOWED_CATEGORIES).
+      # worldcup is classified-but-blocked; weather stays as a carve-out.
+      allow: [macro, politics, crypto, weather]
       # Untagged markets could be ANY category (incl. other sports), so don't
       # let them bypass the whitelist. Keep false for "only these categories".
       allow_uncategorized: false
@@ -119,10 +122,10 @@ gates:
       min_score: 0.05
       min_wallets: 2
       # Per-category confidence floors (override min_score for these buckets).
-      # Sports was our biggest live loser/noise, so MLB (the one tradable sport)
-      # fires ONLY on strong clusters — must score >= 0.5; everything else keeps
-      # 0.05. sports_major/sports_other are gate-blocked upstream (category_match)
-      # but keep their floors here in case a sport is re-enabled later.
+      # Sports was our biggest live loser/noise. All sports buckets (sports_mlb
+      # included, now that MLB is disabled) are gate-blocked upstream in
+      # category_match, so these floors are currently inert — kept here at >= 0.5
+      # so re-enabling any sport restores its strong-cluster requirement.
       category_min_score:
         sports_mlb: 0.5
         sports_major: 0.5

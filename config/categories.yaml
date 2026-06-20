@@ -37,16 +37,21 @@ categories:
     top_n: 50
     min_win_rate: 0.55
 
-  # MLB baseball — the ONLY sport currently in the gate allow-list (operator
-  # request: "disable all sports except MLB"). A carve-out in polybot/
-  # categorize.py routes MLB here even when tagged generic `sports`, so it stays
-  # tradable while every other sport is gate-blocked. enabled:true keeps these
-  # tags in the tag_map AND lets MLB sharps be discovered.
+  # MLB baseball — DISABLED (operator request). Was previously the only tradable
+  # sport; now turned off. enabled:false drops mlb/baseball from the tag_map and
+  # stops MLB sharp-wallet discovery, and sports_mlb has been removed from the
+  # gates.yaml category_match allow-list so MLB markets are gate-blocked. This is
+  # a config-only change: the sports_mlb entry is intentionally LEFT in
+  # HARD_ALLOWED_CATEGORIES (services/signals/conditions/category.py) so the
+  # signals service does not need rebuilding. NOTE: the categorize.py carve-out
+  # still LABELS MLB markets as sports_mlb, but they no longer trade. To
+  # re-enable: set enabled:true here and re-add sports_mlb to the gates.yaml
+  # allow-list (both hot-reload within ~60s, no rebuild).
   sports_mlb:
     tags:
       - mlb
       - baseball
-    enabled: true
+    enabled: false
     top_n: 30
     min_win_rate: 0.55
 
