@@ -365,9 +365,36 @@ async def _event_already_held(s, *, mode: str, market_id: str,
     return row[0] if row else None
 
 
+async def _bet_notional(s, *, mode: str, market_id: str) -> float:
+    """Current cumulative notional (USDC) committed to ``market_id`` for ``mode``,
+    INCLUDING resting/in-flight orders.
+
+    Paper keeps a Position lifecycle, so its net notional is authoritative. The
+    LIVE path writes only Fill rows (no Position), so we sum non-rejected BUY
+    fills — ``filled`` + ``submitted`` + ``partial`` — which means a resting
+    (unfilled) limit order STILL counts toward the cap. That closes the loophole
+    where the old Position-only query summed to ~0 in live and let the bot stack
+    many small limit orders on one market past the ceiling (it reached ~$90).
+    """
+    if mode == "live":
+        return float((await s.execute(
+            select(func.coalesce(func.sum(Fill.notional_usdc), 0.0)).where(
+                Fill.mode == "live",
+                Fill.market_id == market_id,
+                Fill.side == "BUY",
+                Fill.status.in_(("filled", "submitted", "partial")),
+            )
+        )).scalar_one())
+    return float((await s.execute(
+        select(func.coalesce(
+            func.sum(func.abs(Position.size_shares) * Position.avg_price), 0.0))
+        .where(Position.market_id == market_id)
+    )).scalar_one())
+
+
 async def preflight(*, mode: str, market_id: str, category: str | None,
                     side: str, size_usdc: float, score: float,
-                    outcome: str | None = None) -> dict:
+                    outcome: str | None = None, price: float = 0.0) -> dict:
     """Returns {"ok": True, ...} or raises RiskRejection.
 
     `mode` (paper|live) is the caller's declared mode (executor's
@@ -523,13 +550,22 @@ async def preflight(*, mode: str, market_id: str, category: str | None,
                 raise RiskRejection(
                     f"politics_candidate:{cand}:held={held_pmid[:12]}")
 
-        existing = (await s.execute(
-            select(func.coalesce(
-                func.sum(func.abs(Position.size_shares) * Position.avg_price), 0.0))
-            .where(Position.market_id == market_id)
-        )).scalar_one()
-        if existing + size_usdc > float(pos_cfg.get("max_per_market_usdc", max_pos)):
-            raise RiskRejection(f"per_market_cap:{existing}+{size_usdc}")
+        # 3) per-BET cumulative cap — TOTAL notional committed to this market,
+        #    counting resting/in-flight orders (see _bet_notional) so the bot
+        #    can't sneak past the ceiling by stacking many small limit orders.
+        #    Low-odds bets (entry price < threshold) get a much tighter cap so the
+        #    bot can't pour money into long shots: once a sub-threshold bet hits
+        #    that small cap, every further order on it is refused.
+        existing = await _bet_notional(s, mode=order_mode, market_id=market_id)
+        low_odds = 0.0 < price < float(pos_cfg.get("low_odds_price_threshold", 0.20))
+        bet_cap = float(
+            pos_cfg.get("low_odds_max_per_bet_usdc", 5.0) if low_odds
+            else pos_cfg.get("max_per_market_usdc", max_pos)
+        )
+        if existing + size_usdc > bet_cap:
+            tag = ":low_odds" if low_odds else ""
+            raise RiskRejection(
+                f"per_bet_cap:{existing:.2f}+{size_usdc:.2f}>{bet_cap:.2f}{tag}")
 
         # 4) per-category cap — sum notional across all markets sharing the
         #    current signal's category. We resolve the category here as a

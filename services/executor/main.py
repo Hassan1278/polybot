@@ -41,6 +41,10 @@ async def handle(sig: dict) -> None:
     side = sig["side"]
     size_usdc = float(sig.get("size_usdc", settings.max_position_usdc))
     score = float(sig.get("score", 0.0))
+    # Entry price (probability, 0-1) — drives the low-odds per-bet cap in
+    # preflight. Falls back to 0.0 when absent (treated as "unknown odds", so the
+    # full per-bet cap applies rather than the tight long-shot cap).
+    price = float(sig.get("avg_price", 0.0) or 0.0)
 
     # Idempotency pre-check moved INSIDE the per-mode for-loop below.
     # Parallel mode (paper + live) needs to skip ONLY modes that have
@@ -121,7 +125,7 @@ async def handle(sig: dict) -> None:
             try:
                 await preflight(mode=exec_mode, market_id=market_id,
                                 category=category, side=side, size_usdc=size_usdc,
-                                score=score, outcome=outcome)
+                                score=score, outcome=outcome, price=price)
             except RiskRejection as rej:
                 log.warning("risk_rejected", signal=sid, mode=exec_mode, reason=str(rej))
                 async with session_scope() as s:

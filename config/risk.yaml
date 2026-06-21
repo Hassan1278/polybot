@@ -43,7 +43,19 @@ defaults:
   position:
     max_position_usdc: 25
     max_open_positions: 50
-    max_per_market_usdc: 25
+    # Cumulative cap PER BET (one market): total notional across ALL orders,
+    # counting resting/unfilled limit orders — NOT a per-order cap. The bot was
+    # stacking small limit orders past the old ceiling (which only summed paper
+    # Positions and so read ~0 in live), letting one market reach ~$90. Hard 50
+    # USDC ceiling on total exposure to a single bet.
+    max_per_market_usdc: 50
+    # Long-shot guard: any bet whose entry price is below low_odds_price_threshold
+    # may hold at most low_odds_max_per_bet_usdc cumulatively. Once a sub-threshold
+    # bet reaches that cap, every further order on it is refused (the odds are too
+    # bad to keep adding). At/above the threshold, the full max_per_market_usdc
+    # applies. Price is the entry probability (0-1), e.g. 0.20 = 20c.
+    low_odds_price_threshold: 0.20
+    low_odds_max_per_bet_usdc: 5
     max_per_category_usdc: 400
     size_sigmoid_anchor: 0.6
     # Hold at most ONE outcome per market — block the bot from buying both

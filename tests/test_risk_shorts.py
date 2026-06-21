@@ -62,15 +62,18 @@ def _patch_session(monkeypatch, results):
     return sess
 
 
-def _patch_cfg(monkeypatch, *, max_position_usdc=25.0, max_per_market=25.0,
+def _patch_cfg(monkeypatch, *, max_position_usdc=25.0, max_per_market=50.0,
                max_per_category=75.0, max_open=5, max_orders_min=6,
-               max_daily_loss=50.0):
+               max_daily_loss=50.0, low_odds_threshold=0.20, low_odds_max=5.0,
+               mode="paper"):
     cfg = {
         "position": {
             "max_position_usdc": max_position_usdc,
             "max_per_market_usdc": max_per_market,
             "max_per_category_usdc": max_per_category,
             "max_open_positions": max_open,
+            "low_odds_price_threshold": low_odds_threshold,
+            "low_odds_max_per_bet_usdc": low_odds_max,
         },
         "drawdown": {"max_daily_loss_usdc": max_daily_loss},
         "execution": {"max_orders_per_minute": max_orders_min},
@@ -79,11 +82,11 @@ def _patch_cfg(monkeypatch, *, max_position_usdc=25.0, max_per_market=25.0,
     # patched its .get(). The runtime_config refactor switched to
     # merged_risk() which reads YAML + Redis overrides. Mock that path
     # instead. Same shape (dict with position / drawdown / execution).
-    async def _merged_risk(mode=None):
+    async def _merged_risk(_m=None):
         return cfg
     monkeypatch.setattr(risk_mod, "merged_risk", _merged_risk)
     async def _current_mode():
-        return "paper"
+        return mode
     monkeypatch.setattr(risk_mod, "current_mode", _current_mode)
 
 
@@ -206,3 +209,87 @@ def test_preflight_kill_switch_blocks_everything(monkeypatch):
             side="BUY", size_usdc=5.0, score=0.9,
         ))
     assert "kill_switch_active" in str(excinfo.value)
+
+
+# ── per-bet cumulative cap (counts resting orders, mode-aware) ───────────────
+
+def test_per_bet_cap_counts_resting_orders_in_live(monkeypatch):
+    # LIVE: $45 of filled+resting BUY notional already on the market. A new $20
+    # order pushes cumulative to $65 > $50 cap → reject. (The old Position-only
+    # query summed to ~0 in live and let this stack through — the actual bug.)
+    _patch_cfg(monkeypatch, max_per_market=50.0, mode="live")
+    _patch_kill(monkeypatch, status=None)
+    _patch_session(monkeypatch, [_Result(scalar=45.0)])  # _bet_notional (Fill sum)
+    with pytest.raises(risk_mod.RiskRejection) as excinfo:
+        asyncio.run(risk_mod.preflight(
+            mode="live", market_id="M1", category="politics",
+            side="BUY", size_usdc=20.0, score=0.7,
+        ))
+    assert "per_bet_cap" in str(excinfo.value)
+
+
+def test_per_bet_cap_passes_under_limit(monkeypatch):
+    _patch_cfg(monkeypatch, max_per_market=50.0)
+    _patch_kill(monkeypatch, status=None)
+    _patch_session(monkeypatch, [_Result(scalar=30.0)])  # rest fall back to 0
+    out = asyncio.run(risk_mod.preflight(
+        mode="paper", market_id="M1", category="crypto",
+        side="BUY", size_usdc=15.0, score=0.7, price=0.50,
+    ))
+    assert out["ok"] is True
+
+
+# ── low-odds (sub-threshold price) tight cap ─────────────────────────────────
+
+def test_low_odds_cap_blocks_above_5usd(monkeypatch):
+    # Entry price 0.15 (< 0.20) → $5 cap. Existing $3 + new $4 = $7 > $5 → reject.
+    _patch_cfg(monkeypatch)
+    _patch_kill(monkeypatch, status=None)
+    _patch_session(monkeypatch, [_Result(scalar=3.0)])
+    with pytest.raises(risk_mod.RiskRejection) as excinfo:
+        asyncio.run(risk_mod.preflight(
+            mode="paper", market_id="M1", category="crypto",
+            side="BUY", size_usdc=4.0, score=0.7, price=0.15,
+        ))
+    msg = str(excinfo.value)
+    assert "per_bet_cap" in msg and "low_odds" in msg
+
+
+def test_low_odds_cap_allows_under_5usd(monkeypatch):
+    _patch_cfg(monkeypatch)
+    _patch_kill(monkeypatch, status=None)
+    _patch_session(monkeypatch, [_Result(scalar=3.0)])
+    out = asyncio.run(risk_mod.preflight(
+        mode="paper", market_id="M1", category="crypto",
+        side="BUY", size_usdc=1.0, score=0.7, price=0.15,
+    ))
+    assert out["ok"] is True
+
+
+def test_low_odds_at_cap_blocks_further_orders(monkeypatch):
+    # A sub-20c bet already at the $5 cap: ANY further order is refused, so the
+    # bot stops piling into long shots once it hits the limit.
+    _patch_cfg(monkeypatch)
+    _patch_kill(monkeypatch, status=None)
+    _patch_session(monkeypatch, [_Result(scalar=5.0)])
+    with pytest.raises(risk_mod.RiskRejection) as excinfo:
+        asyncio.run(risk_mod.preflight(
+            mode="paper", market_id="M1", category="crypto",
+            side="BUY", size_usdc=1.0, score=0.7, price=0.15,
+        ))
+    assert "per_bet_cap" in str(excinfo.value)
+
+
+def test_high_odds_uses_full_50_cap(monkeypatch):
+    # Price 0.50 (>= 0.20) → full $50 cap, not the long-shot cap. $40 + $15 = $55
+    # > $50 → reject, and the reason is NOT tagged low_odds.
+    _patch_cfg(monkeypatch, max_per_market=50.0)
+    _patch_kill(monkeypatch, status=None)
+    _patch_session(monkeypatch, [_Result(scalar=40.0)])
+    with pytest.raises(risk_mod.RiskRejection) as excinfo:
+        asyncio.run(risk_mod.preflight(
+            mode="paper", market_id="M1", category="crypto",
+            side="BUY", size_usdc=15.0, score=0.7, price=0.50,
+        ))
+    msg = str(excinfo.value)
+    assert "per_bet_cap" in msg and "low_odds" not in msg
