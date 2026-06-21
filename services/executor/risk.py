@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_, func, select
 
 from polybot.asset_direction import CRYPTO_MAJORS, asset_of, direction, range_bet, same_bracket
+from polybot.politics_candidate import candidate_of
 from polybot.clients import ClobClient
 from polybot.db import session_scope
 from polybot.logging import get_logger
@@ -265,6 +266,66 @@ async def _crypto_timeframe_conflict(s, *, mode: str, market_id: str,
     return None
 
 
+async def _politics_candidate_held(s, *, mode: str, market_id: str) -> tuple[str, str] | None:
+    """One-position-per-politics-candidate check.
+
+    If the incoming market names a (non-excluded) candidate we ALREADY hold an
+    open position on in a DIFFERENT politics market, return ``(candidate, held_mid)``;
+    otherwise None. Keyed on the candidate NAME parsed from the question (Trump
+    excluded), so it links markets that share no Polymarket event_id — the gap the
+    one-position-per-event guard can't cover. Precision-biased: returns None on any
+    ambiguity (non-politics market, unparseable or excluded candidate name) so the
+    caller fails open. Only still-OPEN markets (``end_date`` in the future)
+    constrain new orders, so a resolved race never blocks a fresh, unrelated entry.
+    """
+    row = (await s.execute(
+        select(Market.question, Market.slug, Market.category)
+        .where(Market.market_id == market_id)
+    )).first()
+    if not row:
+        return None
+    q, slug, cat = row
+    if str(cat or "").lower() != "politics":
+        return None
+    cand = candidate_of(q, slug)
+    if cand is None:
+        return None
+
+    now = datetime.now(tz=timezone.utc)
+    if mode == "live":
+        rows = (await s.execute(
+            select(Market.question, Market.slug, Fill.market_id)
+            .join(Market, Market.market_id == Fill.market_id)
+            .where(
+                Fill.mode == "live",
+                Fill.side == "BUY",
+                Fill.status.in_(("filled", "submitted", "partial")),
+                Market.category == "politics",
+                Market.market_id != market_id,
+                Market.end_date > now,
+            )
+        )).all()
+    else:
+        rows = (await s.execute(
+            select(Market.question, Market.slug, Position.market_id)
+            .join(Market, Market.market_id == Position.market_id)
+            .where(
+                func.abs(Position.size_shares) > 0,
+                Market.category == "politics",
+                Market.market_id != market_id,
+                Market.end_date > now,
+            )
+        )).all()
+
+    for hq, hs, hmid in rows:
+        if hmid == market_id:
+            continue                       # same market — one_direction_per_market handles it
+        if candidate_of(hq, hs) == cand:
+            return cand, hmid
+
+    return None
+
+
 async def _event_already_held(s, *, mode: str, market_id: str,
                               event_id: str) -> str | None:
     """One-position-per-event check.
@@ -439,6 +500,28 @@ async def preflight(*, mode: str, market_id: str, category: str | None,
             if held_mid:
                 raise RiskRejection(
                     f"event_conflict:{str(event_id)[:18]}:held={held_mid[:12]}")
+
+        # One-position-per-POLITICS-CANDIDATE: hold at most ONE open bet per
+        # candidate. The bot mirrors smart money per-market and otherwise stacks
+        # several (often contradictory) bets on the same person across different
+        # markets/events — e.g. an open "X win by 5-10%" position while it keeps
+        # placing "X not president" orders. Keyed on the candidate NAME parsed from
+        # the question (so it links markets that share no event_id); Trump is
+        # excluded (his name spans too many unrelated markets). Fail-OPEN on any
+        # error or unparseable name. Disable with
+        # position.one_position_per_politics_candidate: false.
+        if outcome and pos_cfg.get("one_position_per_politics_candidate", True):
+            try:
+                pc = await _politics_candidate_held(
+                    s, mode=order_mode, market_id=market_id)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("politics_candidate_check_failed",
+                            market_id=market_id, err=str(exc))
+                pc = None
+            if pc:
+                cand, held_pmid = pc
+                raise RiskRejection(
+                    f"politics_candidate:{cand}:held={held_pmid[:12]}")
 
         existing = (await s.execute(
             select(func.coalesce(

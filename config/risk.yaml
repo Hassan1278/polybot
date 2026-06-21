@@ -73,6 +73,14 @@ defaults:
     # in an event wins; its still-open siblings are blocked. Markets with no
     # parent event are unaffected. Set false to disable.
     one_position_per_event: true
+    # Hold at most ONE open bet per POLITICS candidate. The bot otherwise stacks
+    # several (often contradictory) bets on the same person across different
+    # markets/events — e.g. backing "X win by 5-10%" while it keeps placing "X not
+    # president" orders. Keyed on the candidate NAME parsed from the question, so it
+    # links markets that share no event_id. Trump is excluded (his name spans too
+    # many unrelated markets). Precision-biased: fails open on unparseable names or
+    # non-politics markets. Set false to disable.
+    one_position_per_politics_candidate: true
 
   drawdown:
     max_daily_loss_usdc: 50
