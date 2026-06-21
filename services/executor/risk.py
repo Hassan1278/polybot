@@ -266,6 +266,94 @@ async def _crypto_timeframe_conflict(s, *, mode: str, market_id: str,
     return None
 
 
+async def _same_day_bucket_conflict(s, *, mode: str, market_id: str,
+                                    outcome: str, side: str) -> tuple[str, str, str] | None:
+    """At most ONE crypto price-BUCKET position per asset per resolution DAY (UTC).
+
+    Daily crypto settlements are listed as several mutually-related "between $A and
+    $B" buckets ("62-64k", "64-66k", ...). Mirroring smart money the bot would
+    otherwise take more than one — e.g. an open "NO 62-64k" while a new order is
+    "NO 64-66k" for the SAME day. Both NO legs share a stance, so the directional
+    guards (``_asset_conflict`` / ``_crypto_timeframe_conflict``) never fire; and the
+    buckets often share no populated Polymarket ``event_id``, so ``_event_already_held``
+    misses them too. Return ``(asset, want_band, held_mid)`` if this order is a range
+    bet on the same asset + same UTC resolution day as an already-open range position
+    covering a DIFFERENT price band; otherwise None.
+
+    Deliberately ``event_id``-INDEPENDENT — it keys on (asset, day, band) parsed from
+    the question — so it holds even when Gamma doesn't group the buckets. Like its
+    sibling guards it's PRECISION-biased: returns None on any ambiguity (non-crypto,
+    unparseable asset/range, missing end_date, same band) so the caller fails open.
+    Only still-OPEN markets (``end_date`` in the future) constrain new orders, so a
+    settled bucket never blocks the next day's fresh bet.
+    """
+    row = (await s.execute(
+        select(Market.question, Market.slug, Market.category, Market.end_date)
+        .where(Market.market_id == market_id)
+    )).first()
+    if not row:
+        return None
+    q, slug, cat, end_date = row
+    if str(cat or "").lower() != "crypto" or end_date is None:
+        return None
+    asset = asset_of(q, slug)
+    if asset is None:
+        return None
+    want = range_bet(q, slug, outcome, side)            # (stance, lo, hi) / None
+    if want is None:
+        return None                                     # not a bucket market — skip
+    if end_date.tzinfo is None:
+        end_date = end_date.replace(tzinfo=timezone.utc)
+    want_day = end_date.astimezone(timezone.utc).date()
+
+    now = datetime.now(tz=timezone.utc)
+    if mode == "live":
+        # Live path is long-only and writes only Fill rows; a non-rejected BUY on
+        # an open crypto market counts as still-held exposure.
+        rows = (await s.execute(
+            select(Market.question, Market.slug, Fill.outcome, Fill.side,
+                   Market.end_date, Fill.market_id)
+            .join(Market, Market.market_id == Fill.market_id)
+            .where(
+                Fill.mode == "live",
+                Fill.side == "BUY",
+                Fill.status.in_(("filled", "submitted", "partial")),
+                Market.category == "crypto",
+                Market.end_date > now,
+            )
+        )).all()
+        held = [(hq, hs, ho, hsd, hed, hmid)
+                for (hq, hs, ho, hsd, hed, hmid) in rows]
+    else:
+        rows = (await s.execute(
+            select(Market.question, Market.slug, Position.outcome,
+                   Market.end_date, Position.market_id)
+            .join(Market, Market.market_id == Position.market_id)
+            .where(
+                func.abs(Position.size_shares) > 0,
+                Market.category == "crypto",
+                Market.end_date > now,
+            )
+        )).all()
+        held = [(hq, hs, ho, "BUY", hed, hmid)
+                for (hq, hs, ho, hed, hmid) in rows]
+
+    for hq, hs, ho, hsd, hed, hmid in held:
+        if hmid == market_id:
+            continue                       # same market — one_direction_per_market handles it
+        if asset_of(hq, hs) != asset or hed is None:
+            continue
+        if hed.tzinfo is None:
+            hed = hed.replace(tzinfo=timezone.utc)
+        if hed.astimezone(timezone.utc).date() != want_day:
+            continue                       # different resolution day — separate book
+        hbucket = range_bet(hq, hs, ho, hsd)
+        if hbucket is not None and not same_bracket(hbucket, want):
+            return asset, f"{int(want[1])}-{int(want[2])}", hmid
+
+    return None
+
+
 async def _politics_candidate_held(s, *, mode: str, market_id: str) -> tuple[str, str] | None:
     """One-position-per-politics-candidate check.
 
@@ -501,6 +589,29 @@ async def preflight(*, mode: str, market_id: str, category: str | None,
                 asset, want_dir, have_asset, day = xconf
                 raise RiskRejection(
                     f"crypto_timeframe_conflict:{asset}_{want_dir}_vs_{have_asset}:day={day}")
+
+        # One-position-per-CRYPTO-BUCKET: hold at most ONE price-bucket position per
+        # crypto asset per UTC resolution day. Daily settlements list several
+        # "between $A-$B" buckets; mirroring smart money the bot would otherwise take
+        # more than one — e.g. an open "NO 62-64k" while a new order is "NO 64-66k"
+        # for the same day. Both NO legs share a stance so the directional guards
+        # don't fire, and the buckets often share no populated event_id so the
+        # per-event guard misses them. Keyed on (asset, day, band) parsed from the
+        # question — event_id-independent — and fail-OPEN on any error. Disable with
+        # position.one_position_per_crypto_bucket: false.
+        if outcome and pos_cfg.get("one_position_per_crypto_bucket", True):
+            try:
+                bconf = await _same_day_bucket_conflict(
+                    s, mode=order_mode, market_id=market_id,
+                    outcome=outcome, side=side)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("crypto_bucket_conflict_check_failed",
+                            market_id=market_id, err=str(exc))
+                bconf = None
+            if bconf:
+                asset, band, held_mid = bconf
+                raise RiskRejection(
+                    f"crypto_bucket_conflict:{asset}_{band}:held={held_mid[:12]}")
 
         # One-position-per-EVENT: hold at most ONE market per Polymarket event,
         # so the bot can't take multiple (often offsetting) positions on the

@@ -78,6 +78,16 @@ defaults:
     # directional bets keep trading. Precision-biased (fails open on ambiguous
     # direction/asset). Set false to disable.
     one_direction_per_crypto_timeframe: true
+    # Hold at most ONE price-BUCKET position per crypto asset per UTC resolution
+    # day. Daily settlements list several "between $A-$B" buckets ("62-64k",
+    # "64-66k", ...); mirroring smart money the bot would otherwise take more than
+    # one — e.g. an open "NO 62-64k" while a new order is "NO 64-66k" for the same
+    # day. Both NO legs share a stance so the directional guards don't fire, and the
+    # buckets often share no populated event_id so the per-event guard misses them.
+    # Keyed on (asset, day, band) parsed from the question — event_id-independent.
+    # Precision-biased: fails open on non-crypto, unparseable asset/range, or missing
+    # resolution date. Set false to disable.
+    one_position_per_crypto_bucket: true
     # Hold at most ONE market per Polymarket EVENT. Sibling markets of one
     # event (all candidates in a primary, both sides of a match, ...) can be
     # mutually exclusive, so taking several is an implicit two-sided bet — e.g.
