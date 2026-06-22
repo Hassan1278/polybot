@@ -145,7 +145,7 @@ defaults:
   # in paper by default; LIVE selling stays OFF (live_enabled) until validated.
   exit_mirror:
     enabled: true                  # run detection (paper closes shadow-run)
-    live_enabled: false            # ACTUALLY sell live positions — flip on AFTER paper validation
+    live_enabled: true             # LIVE exits ON — close live positions when the entry cluster dissolves
     support_dissolution_threshold: 0.5         # exit when < this fraction of the cluster (quality-weighted) is still long
     fallback_support_dissolution_threshold: 0.35   # stricter when the cluster is only INFERRED (no entry Signal)
     live_exit_on_fallback: false   # never auto-sell live off an inferred cluster
@@ -189,4 +189,4 @@ modes:
       anchor: 0.65                            # only high-score signals get size
       steepness: 4.0
     exit_mirror:
-      live_enabled: false                     # explicit: live exits stay OFF until validated in paper
+      live_enabled: true                      # LIVE exits ON (operator-enabled; bot-attributable positions only)
