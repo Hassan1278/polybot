@@ -149,7 +149,12 @@ async def _ingest_wallet(d: DataClient, addr: str, *, max_trades: int = 200) -> 
     return n
 
 
-async def run_trade_ingest(*, concurrency: int = 8) -> None:
+# Concurrency is capped low on purpose: with ~200 active wallets a 60s sweep at
+# concurrency 8 bursts at ~19 req/s on data-api /trades — right at the 20 req/s
+# ceiling and leaving no room for the stats_loop / leaderboard loops that also
+# hit /trades. concurrency=4 holds the burst near the ~10 req/s safe-sustained
+# rate (the sweep still finishes in ~20-25s, far inside the 60s interval).
+async def run_trade_ingest(*, concurrency: int = 4) -> None:
     addrs = await _wallet_addresses()
     if not addrs:
         log.warning("trade_ingest_no_wallets")
