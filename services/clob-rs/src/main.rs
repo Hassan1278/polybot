@@ -162,8 +162,11 @@ async fn cancel_all(State(st): State<Arc<AppState>>) -> (StatusCode, Json<Value>
 // Live pUSD collateral balance the CLOB sees for the deposit wallet. This is
 // the authoritative "cash" number (the same balance the order builder checks),
 // so the dashboard can show real available collateral instead of the paper
-// ledger. `balance` is in human USDC units (dollars), serialized as a string
-// to preserve Decimal precision across the JSON hop.
+// ledger. NOTE: `balance` is returned in raw 6-decimal BASE UNITS (microUSDC),
+// serialized as a string to preserve Decimal precision across the JSON hop. The
+// Python client (clients/clob.py ClobClient.balance) divides by 1e6 to get human
+// dollars — do NOT divide here too, or you double-convert and silently disable
+// the equity-drawdown circuit breaker.
 async fn balance(State(st): State<Arc<AppState>>) -> (StatusCode, Json<Value>) {
     let req = BalanceAllowanceRequest::builder()
         .asset_type(AssetType::Collateral)

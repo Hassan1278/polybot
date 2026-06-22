@@ -164,15 +164,46 @@ class ClobClient(HttpClient):
         return d if isinstance(d, list) else []
 
     async def balance(self) -> dict[str, Any]:
-        """Live pUSD collateral balance for the deposit wallet, as the CLOB
-        sees it (via the clob-rs sidecar). Shape: ``{"ok", "balance", "funder"}``
-        on success or ``{"ok": false, "error"}`` on failure. ``balance`` is a
-        decimal string in human USDC units. Best-effort: never raises, so a
-        sleeping sidecar degrades to an error dict the dashboard can render.
+        """Live pUSD collateral balance (in DOLLARS) for the deposit wallet, as
+        the CLOB sees it (via the clob-rs sidecar). Shape:
+        ``{"ok", "balance", "funder"}`` on success or ``{"ok": false, "error"}``.
+
+        UNITS — IMPORTANT: the clob-rs sidecar returns the on-chain USDC balance
+        in raw 6-decimal BASE UNITS (microUSDC) — e.g. "32845218.43" means ~$32.85.
+        This method is the SINGLE chokepoint that converts to human dollars, so
+        every consumer (the equity-drawdown breaker, the /live/account card) gets
+        dollars. If clob-rs is EVER changed to return dollars itself, delete the
+        conversion here and update this comment — double-converting silently
+        re-breaks the live circuit breaker (it was reading a $33 account as $32.8M,
+        so the 15% drawdown guard never tripped). Best-effort: never raises, so a
+        sleeping sidecar degrades to an error dict.
         """
         try:
             async with httpx.AsyncClient(timeout=12.0) as c:
                 r = await c.get(f"{_CLOB_RS_URL}/balance")
-            return r.json() if r.content else {"ok": False, "error": "empty response"}
+            data = r.json() if r.content else {"ok": False, "error": "empty response"}
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:140]}"}
+        if isinstance(data, dict) and data.get("ok") and data.get("balance") is not None:
+            data["balance"] = self._micro_usdc_to_dollars(data["balance"])
+        return data
+
+    @staticmethod
+    def _micro_usdc_to_dollars(raw: Any) -> str:
+        """Convert a clob-rs microUSDC balance (6-decimal base units) to a
+        human-dollar string, e.g. "32845218.43" -> "32.845218". Returns a string
+        to preserve the decimal-string contract (consumers float() it). On a parse
+        failure, returns the raw value unchanged and logs once (balance() is
+        best-effort and must never raise)."""
+        try:
+            dollars = float(str(raw)) / 1_000_000.0
+        except (TypeError, ValueError):
+            log.warning("balance_unit_anomaly", reason="unparseable", raw=str(raw)[:32])
+            return str(raw)
+        if dollars > 1e7:
+            # Sentinel only (no behaviour change): no account here holds >$10M, so
+            # this almost certainly means the raw value was NOT base units (sidecar
+            # contract drift). Log loudly; the converted value is still returned.
+            log.warning("balance_unit_anomaly", reason="implausibly_large",
+                        dollars=dollars, raw=str(raw)[:32])
+        return f"{dollars:.6f}"
