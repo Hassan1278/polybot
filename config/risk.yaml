@@ -139,6 +139,22 @@ defaults:
     anchor: 0.5
     steepness: 2.5
 
+  # Exit-mirror (Stage 3): follow smart money OUT. When the entry cluster for a
+  # position we hold dissolves (quality-weighted support drops below the
+  # threshold), STOP ADDING to that thesis and CLOSE the position. Detection runs
+  # in paper by default; LIVE selling stays OFF (live_enabled) until validated.
+  exit_mirror:
+    enabled: true                  # run detection (paper closes shadow-run)
+    live_enabled: false            # ACTUALLY sell live positions — flip on AFTER paper validation
+    support_dissolution_threshold: 0.5         # exit when < this fraction of the cluster (quality-weighted) is still long
+    fallback_support_dissolution_threshold: 0.35   # stricter when the cluster is only INFERRED (no entry Signal)
+    live_exit_on_fallback: false   # never auto-sell live off an inferred cluster
+    cooldown_seconds: 300          # one close per (mode, market, outcome) per window
+    backstop_sweep_seconds: 120    # periodic re-check (pub/sub is lossy)
+    passive: false                 # exits cross the book (taker) so they fill; true = maker
+    allow_close_when_killed: true  # a close may bypass the kill switch (closing de-risks)
+    quality_window: "30d"          # WalletStats window for cluster quality weights
+
   live_only:
     require_kill_switch_check: true
     require_admin_token_for_size_above_usdc: 100
@@ -172,3 +188,5 @@ modes:
       max_usdc: 25                            # ceiling = position cap
       anchor: 0.65                            # only high-score signals get size
       steepness: 4.0
+    exit_mirror:
+      live_enabled: false                     # explicit: live exits stay OFF until validated in paper

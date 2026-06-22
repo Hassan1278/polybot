@@ -11,6 +11,7 @@ from polybot.db import session_scope
 from polybot.logging import get_logger
 from polybot.market_resolver import ensure_market
 from polybot.models import AuditLog, Signal
+from polybot.redis_bus import THESIS_DISSOLVING_KEY
 from polybot.redis_bus import client as redis_client
 from polybot.redis_bus import publish
 from polybot.runtime_config import current_mode, merged_gates, merged_risk
@@ -46,6 +47,23 @@ async def process_candidate(cand: dict, *, target_size_usdc: float | None = None
     ``None`` the size is derived from the final post-gate score using the
     `sizing` block in `risk.yaml`.
     """
+    # Exit-mirror "stop adding": if the entry cluster for this (market, outcome)
+    # is dissolving (flagged by the exit_loop), don't open or add to the thesis.
+    # Money-safe — this only PREVENTS a new BUY entry. Fails open on a redis hiccup.
+    if str(cand.get("side", "")).upper() == "BUY":
+        try:
+            _dissolving = await redis_client().get(
+                THESIS_DISSOLVING_KEY.format(
+                    mid=cand["market_id"],
+                    oc=str(cand.get("outcome", "YES")).upper()))
+        except Exception:  # noqa: BLE001
+            _dissolving = None
+        if _dissolving:
+            log.info("entry_suppressed_thesis_dissolving",
+                     market=cand["market_id"], outcome=cand.get("outcome"))
+            return {"id": None, "pass": False, "gates": {},
+                    "suppressed": "thesis_dissolving"}
+
     # JIT-resolve the market — most trades from tracked wallets are on long-tail
     # markets that the bulk ingest doesn't cover. We need category metadata for
     # the very first gate, so fetch on demand. Best-effort: if the resolver

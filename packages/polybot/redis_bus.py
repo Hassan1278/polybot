@@ -45,6 +45,10 @@ log = get_logger(__name__)
 
 KILL_KEY = "polybot:kill_switch"
 
+# Exit-mirror (Stage 3): set by the exit_loop when an entry cluster is dissolving;
+# read by the signals engine to STOP ADDING new entries to that (market, outcome).
+THESIS_DISSOLVING_KEY = "polybot:thesis_dissolving:{mid}:{oc}"
+
 _pool = redis.ConnectionPool.from_url(settings.redis_url, decode_responses=True)
 
 
