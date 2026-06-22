@@ -3,7 +3,7 @@
 Watermark optimisation:
 
 The Data API has no `since=` parameter, so we always pull `limit=200` newest
-trades per wallet. To avoid re-publishing the same 200 trades on every 15-min
+trades per wallet. To avoid re-publishing the same 200 trades on every 60-second
 run, we keep a per-wallet HIGH WATERMARK (epoch seconds of the latest trade
 we've already ingested, persisted in Redis with 7-day TTL):
 
@@ -13,9 +13,9 @@ we've already ingested, persisted in Redis with 7-day TTL):
     redundant `trade:new` publishes that wake the correlation loop).
   - Bump the watermark to the newest seen timestamp after the run.
 
-Without this, every 15 min we'd publish ~200 trades × 110 wallets ≈ 22 000
-events the correlation engine has already processed. With it, we publish
-only genuinely new prints.
+Without this, every single run we'd publish ~200 trades × 110 wallets ≈ 22 000
+events the correlation engine has already processed — and at a 60-second cadence
+that redundancy would be relentless. With it, we publish only genuinely new prints.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from polybot.redis_bus import publish
 
 log = get_logger(__name__)
 
-# Watermark Redis key + TTL. 7 days >> our 15-min poll interval, so a wallet
+# Watermark Redis key + TTL. 7 days >> our 60-second poll interval, so a wallet
 # can go dormant for almost a week and still be deduplicated correctly.
 _WM_KEY = "polybot:trade_ingest:wm:{addr}"
 _WM_TTL = 7 * 24 * 3600
@@ -149,7 +149,7 @@ async def _ingest_wallet(d: DataClient, addr: str, *, max_trades: int = 200) -> 
     return n
 
 
-async def run_trade_ingest(*, concurrency: int = 5) -> None:
+async def run_trade_ingest(*, concurrency: int = 8) -> None:
     addrs = await _wallet_addresses()
     if not addrs:
         log.warning("trade_ingest_no_wallets")

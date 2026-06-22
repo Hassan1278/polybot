@@ -1,9 +1,9 @@
 """Ingest service entrypoint.
 
 Schedules six loops concurrently:
-  - market_ingest          : every 5 min, sync active markets + liquidity
+  - market_ingest          : every 3 min, sync active markets + liquidity
   - leaderboard_scraper    : every 30 min, refresh top wallets per category
-  - trade_ingest           : every 15 min, backfill recent trades for tracked wallets
+  - trade_ingest           : every 60 s, pull recent trades for tracked wallets
   - attribution_heartbeat  : every 5 min, silent-failure detector — alerts if no
                              trades attribute to tracked wallets in the lookback
                              window (proxyWallet schema break canary)
@@ -30,7 +30,7 @@ from services.ingest.jobs.trade_ingest import run_trade_ingest
 log = get_logger(__name__)
 
 # Healthy if ANY of the 6 jobs has produced a heartbeat in the last 10 min.
-# market_ingest and attribution_heartbeat run every 5 min so this floor is
+# trade_ingest (60s) and market_ingest (3 min) beat well inside this floor —
 # tight enough to catch a real stall but loose enough to ignore one missed
 # beat. live_listener heartbeats continuously while WS is connected.
 _BEACON = HealthBeacon(name="ingest", stale_after_seconds=600)
@@ -60,10 +60,17 @@ async def main() -> None:
         except NotImplementedError:
             pass  # Windows
 
+    # Poll cadences. data-api/gamma limits are per-IP and generous (~100 req/s
+    # data-api, 20 req/s on /trades); even with trade_ingest at 60s the bot runs
+    # at only ~2-3 req/s total, so SIGNAL FRESHNESS — not the rate limit — is the
+    # binding constraint. trade_ingest is the periodic backstop sweep; the WS
+    # live_listener catches real-time trade bursts in between. trade_ingest was
+    # 900s (15 min), which left the bot blind to smart-money entries/exits for up
+    # to a quarter hour — far too slow for same-day crypto.
     tasks = [
-        asyncio.create_task(_every("market_ingest",         300,  run_market_ingest)),
+        asyncio.create_task(_every("market_ingest",         180,  run_market_ingest)),
         asyncio.create_task(_every("leaderboard",           1800, run_leaderboard)),
-        asyncio.create_task(_every("trade_ingest",          900,  run_trade_ingest)),
+        asyncio.create_task(_every("trade_ingest",          60,   run_trade_ingest)),
         asyncio.create_task(_every("attribution_heartbeat", 300,  run_attribution_heartbeat)),
         asyncio.create_task(_every("resolution_check",      600,  run_resolution_check)),
         asyncio.create_task(run_live_listener()),
