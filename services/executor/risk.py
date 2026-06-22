@@ -559,9 +559,59 @@ async def _bet_notional(s, *, mode: str, market_id: str) -> float:
     )).scalar_one())
 
 
+async def compute_net_shares_held(s, *, mode: str, market_id: str, outcome: str) -> float:
+    """Net shares of (market_id, outcome) we currently hold, for ``mode``.
+
+    Live writes only Fill rows (no Position lifecycle), so net = Σ BUY − Σ SELL
+    over non-rejected fills (status in filled/submitted/partial). Counting
+    SUBMITTED sells (resting / in-flight) as already-reducing is what stops a
+    second exit from double-selling the same shares before the first sell fills.
+    Paper keeps a Position lifecycle, so its size_shares is authoritative. Exact
+    UPPER-cased outcome match — a SELL on "NO" must net only against "NO" BUYs.
+
+    Best-effort: returns 0.0 on any error (fail-safe toward "hold nothing", so we
+    can never size a sell against shares we can't prove we hold)."""
+    want = (outcome or "").upper()
+    if not want:
+        return 0.0
+    try:
+        if mode == "live":
+            buy = (await s.execute(
+                select(func.coalesce(func.sum(Fill.size_shares), 0.0)).where(
+                    Fill.mode == "live",
+                    Fill.market_id == market_id,
+                    func.upper(Fill.outcome) == want,
+                    Fill.side == "BUY",
+                    Fill.status.in_(("filled", "submitted", "partial")),
+                )
+            )).scalar_one()
+            sell = (await s.execute(
+                select(func.coalesce(func.sum(Fill.size_shares), 0.0)).where(
+                    Fill.mode == "live",
+                    Fill.market_id == market_id,
+                    func.upper(Fill.outcome) == want,
+                    Fill.side == "SELL",
+                    Fill.status.in_(("filled", "submitted", "partial")),
+                )
+            )).scalar_one()
+            return float(buy or 0.0) - float(sell or 0.0)
+        row = (await s.execute(
+            select(func.coalesce(func.sum(Position.size_shares), 0.0)).where(
+                Position.market_id == market_id,
+                func.upper(Position.outcome) == want,
+            )
+        )).scalar_one()
+        return float(row or 0.0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("net_shares_query_failed",
+                    market_id=market_id, outcome=want, err=str(exc))
+        return 0.0
+
+
 async def preflight(*, mode: str, market_id: str, category: str | None,
                     side: str, size_usdc: float, score: float,
-                    outcome: str | None = None, price: float = 0.0) -> dict:
+                    outcome: str | None = None, price: float = 0.0,
+                    is_exit: bool = False) -> dict:
     """Returns {"ok": True, ...} or raises RiskRejection.
 
     `mode` (paper|live) is the caller's declared mode (executor's
@@ -573,6 +623,13 @@ async def preflight(*, mode: str, market_id: str, category: str | None,
 
     `outcome` enables the one-direction-per-market guard (skipped when None,
     e.g. legacy/test callers).
+
+    `is_exit=True` marks a position-CLOSING SELL. preflight re-verifies we
+    actually hold the outcome (else it clears the flag and applies the full
+    gauntlet — so the flag can't be abused to open a naked short), then skips
+    every entry/concentration/cap guard (a close only reduces risk) while keeping
+    the order-rate budget. A verified close may also bypass the kill switch,
+    gated by exit_mirror.allow_close_when_killed.
     """
     # Caller's declared exec mode (paper|live) — decides which ledger we check
     # for existing exposure below. `mode` itself gets overwritten by the
@@ -591,6 +648,7 @@ async def preflight(*, mode: str, market_id: str, category: str | None,
     pos_cfg = cfg.get("position", {})
     dd_cfg = cfg.get("drawdown", {})
     exec_cfg = cfg.get("execution", {})
+    exit_cfg = cfg.get("exit_mirror", {})
 
     # 0) input sanity — refuse non-positive sizes, garbage sides, or
     #    NaN/Inf. Without these the upper-bound checks below pass a
@@ -605,10 +663,54 @@ async def preflight(*, mode: str, market_id: str, category: str | None,
     if side not in ("BUY", "SELL"):
         raise RiskRejection(f"bad_side:{side!r}")
 
-    # 1) kill switch
+    # Exit re-verification (defence-in-depth). A close must be a SELL that
+    # genuinely REDUCES a position we hold. Re-check it here so a caller can't set
+    # is_exit=True to skip the entry guards and sneak in a naked short — if we
+    # don't actually hold the outcome, clear the flag and run the full gauntlet.
+    if is_exit:
+        if side != "SELL" or not outcome:
+            is_exit = False
+        else:
+            async with session_scope() as s0:
+                net0 = await compute_net_shares_held(
+                    s0, mode=order_mode, market_id=market_id, outcome=outcome)
+            if net0 <= 0:
+                log.warning("exit_flag_cleared_no_position",
+                            market_id=market_id, outcome=outcome, net=net0)
+                is_exit = False
+
+    # 1) kill switch. A verified close may bypass it — closing only REDUCES risk,
+    #    and a tripped breaker is exactly when you want OUT. Gated by
+    #    exit_mirror.allow_close_when_killed (default true) so the operator can
+    #    still hard-freeze everything. (Order cancels bypass the kill entirely and
+    #    never reach preflight.)
     k = await kill_status()
     if k:
-        raise RiskRejection(f"kill_switch_active:{k}")
+        if not is_exit:
+            raise RiskRejection(f"kill_switch_active:{k}")
+        if not bool(exit_cfg.get("allow_close_when_killed", True)):
+            raise RiskRejection(f"kill_switch_active_exit_blocked:{k}")
+        log.info("kill_bypass_for_exit", market_id=market_id, kill=str(k))
+
+    # CLOSING fast-path. A verified exit can only reduce risk, so skip EVERY
+    # entry/concentration/cap guard below — a SELL is otherwise treated as a NEW
+    # opposite-direction bet by direction(), so asset_conflict / crypto_timeframe /
+    # factor_cap / per_bet_cap / one_direction_per_market would wrongly block the
+    # close. Keep only the order-rate budget so a malfunctioning exit loop can't
+    # hammer the venue; spread is advisory on exits (we want out even in a wide book).
+    if is_exit:
+        async with session_scope() as s:
+            recent = (await s.execute(
+                select(func.count(Fill.id)).where(
+                    Fill.ts >= datetime.now(tz=timezone.utc) - timedelta(seconds=60),
+                    Fill.status.in_(("filled", "partial", "submitted")),
+                )
+            )).scalar_one()
+        rate_cap = int(exec_cfg.get("max_orders_per_minute", 6))
+        if recent >= rate_cap:
+            raise RiskRejection(f"rate_limit_exit:{recent}>={rate_cap}")
+        return {"ok": True, "max_size": float(pos_cfg.get("max_position_usdc", 25.0)),
+                "is_exit": True}
 
     # 2) per-order size
     max_pos = float(pos_cfg.get("max_position_usdc", 25.0))
