@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 
-from polybot.clients import ClobClient
+from polybot.clients import ClobClient, DataClient
 from polybot.config import settings
 from polybot.db import session_scope
 from polybot.logging import get_logger
@@ -135,10 +135,18 @@ def _allowance_hint() -> None:
         _allowance_hint._warned = True  # type: ignore[attr-defined]
 
 
-async def place_live(*, signal_id: int, market_id: str, outcome: str,
-                     side: str, size_usdc: float,
-                     order_kind: str = "maker") -> dict:
-    """Place a real order. `order_kind` is 'maker' (default, GTC) or 'taker' (IOC)."""
+async def _place_order(*, signal_id: int | None, market_id: str, outcome: str,
+                       side: str, order_kind: str = "maker",
+                       size_usdc: float | None = None,
+                       shares: float | None = None) -> dict:
+    """Core order placement shared by entries and exits: resolve token → fetch
+    book → price → submit → record. Pass EXACTLY one of:
+
+      - ``size_usdc`` (entries): converted to shares at the quoted price and
+        floored UP to the venue's MIN_SHARES so small-dollar signals still place.
+      - ``shares``    (exits):   used as-is. A sub-minimum count is REJECTED, never
+        floored up — flooring an exit up would oversell into a naked short.
+    """
     kind = (order_kind or "maker").lower()
     if kind not in ("maker", "taker"):
         return await _record(signal_id, market_id, outcome, side, "rejected",
@@ -185,17 +193,26 @@ async def place_live(*, signal_id: int, market_id: str, outcome: str,
             return await _record(signal_id, market_id, outcome, side, "rejected",
                                  reason=f"price_out_of_range:{px}")
 
-        shares = size_usdc / px
-        # Enforce the venue's 5-share floor (see MIN_SHARES). Below it the CLOB
-        # rejects with "Size lower than the minimum: 5", so bump up and keep the
-        # recorded notional consistent with what we actually sent.
-        if shares < MIN_SHARES:
-            shares = MIN_SHARES
-        notional = round(shares * px, 6)
+        if shares is None:
+            # Entry: dollar-sized at the quote. Enforce the venue's 5-share floor
+            # (see MIN_SHARES): below it the CLOB rejects "Size lower than the
+            # minimum: 5", so bump up and keep the recorded notional consistent.
+            order_shares = size_usdc / px
+            if order_shares < MIN_SHARES:
+                order_shares = MIN_SHARES
+        else:
+            # Exit / explicit shares: use as-is — NEVER floor up (that would
+            # oversell into a naked short). The venue rejects < MIN_SHARES, so we
+            # refuse dust cleanly rather than round it away.
+            order_shares = shares
+            if order_shares < MIN_SHARES:
+                return await _record(signal_id, market_id, outcome, side, "rejected",
+                                     reason=f"shares_below_min:{order_shares:.4f}<{MIN_SHARES}")
+        notional = round(order_shares * px, 6)
 
         try:
             resp = await c.place_limit(token_id=token_id, side=side.upper(),
-                                       price=px, size=shares, order_type=order_type)
+                                       price=px, size=order_shares, order_type=order_type)
         except RuntimeError as exc:
             # ClobClient raises RuntimeError for signing/credential problems.
             msg = str(exc).lower()
@@ -230,8 +247,72 @@ async def place_live(*, signal_id: int, market_id: str, outcome: str,
     status = (resp.get("status") or "submitted").lower()
     venue_id = resp.get("orderID") or resp.get("orderId")
     return await _record(signal_id, market_id, outcome, side, status,
-                         shares=shares, price=px, notional=notional,
+                         shares=order_shares, price=px, notional=notional,
                          venue_order_id=venue_id, raw=resp)
+
+
+async def place_live(*, signal_id: int, market_id: str, outcome: str,
+                     side: str, size_usdc: float,
+                     order_kind: str = "maker") -> dict:
+    """Place a real ENTRY order, dollar-sized. `order_kind` 'maker' (GTC) / 'taker' (IOC)."""
+    return await _place_order(signal_id=signal_id, market_id=market_id, outcome=outcome,
+                              side=side, order_kind=order_kind, size_usdc=size_usdc)
+
+
+async def place_live_shares(*, signal_id: int | None, market_id: str, outcome: str,
+                            side: str, shares: float,
+                            order_kind: str = "taker") -> dict:
+    """Place a real order sized by an explicit SHARE count (exits). Never floors up
+    to the venue minimum — the caller must pass a count it has CONFIRMED is held.
+    Defaults to taker (IOC) so a close crosses the book and actually fills."""
+    return await _place_order(signal_id=signal_id, market_id=market_id, outcome=outcome,
+                              side=side, order_kind=order_kind, shares=shares)
+
+
+async def live_shares_held(market_id: str, outcome: str) -> float | None:
+    """Authoritative shares held of (market_id, outcome) on the venue, read from
+    the data-api positions endpoint (same source as /live/account).
+
+    This — NOT the local Fill ledger — is what sizes a live exit. The live path is
+    fire-and-forget: a 'submitted' Fill is never reconciled to filled/cancelled,
+    so summing Fills can't tell resting from filled and would risk overselling
+    into a naked short. Returns None on ANY failure (no wallet, token unresolved,
+    data-api error) so the caller fails safe and does NOT sell blind; returns 0.0
+    when the wallet simply holds none of this outcome.
+    """
+    from services.executor.equity_guard import _deposit_wallet
+    funder = await _deposit_wallet()
+    if not funder:
+        return None
+    async with session_scope() as s:
+        m = (await s.execute(
+            select(Market.yes_token_id, Market.no_token_id, Market.outcomes)
+            .where(Market.market_id == market_id)
+        )).first()
+    if not m:
+        return None
+    from polybot.market_resolver import token_for_outcome
+    from types import SimpleNamespace
+    shim = SimpleNamespace(yes_token_id=m[0], no_token_id=m[1], outcomes=m[2],
+                           market_id=market_id)
+    token_id = token_for_outcome(shim, outcome)
+    if not token_id:
+        return None
+    d = DataClient()
+    try:
+        rows = await d.positions(funder, limit=500, size_threshold=0.0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("live_shares_held_failed", market_id=market_id, err=str(exc))
+        return None
+    finally:
+        await d.close()
+    for p in (rows or []):
+        if isinstance(p, dict) and str(p.get("asset") or "") == str(token_id):
+            try:
+                return float(p.get("size") or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+    return 0.0          # wallet holds no position in this token
 
 
 async def _record(signal_id: int, market_id: str, outcome: str, side: str,
