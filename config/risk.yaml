@@ -117,6 +117,14 @@ defaults:
     max_weekly_loss_usdc: 150
     daily_reset_utc_hour: 0
     on_breach: kill                           # kill | pause_24h
+    # Live equity-drawdown circuit breaker (the REAL brake). The realised-PnL
+    # checks above are inert in live — the live path writes only Fill rows and
+    # never reconciles realised PnL — so a separate loop (services/executor/
+    # equity_guard.py) reads TRUE venue equity (cash + marked positions) each
+    # minute, snapshots day-start equity, and trips the kill switch when intraday
+    # drawdown exceeds this fraction. Reuses the /live/account data sources.
+    # Fail-safe: never trips on a failed read. Halt is manual-clear. 0/null off.
+    max_daily_drawdown_pct: 0.15
 
   execution:
     cooldown_seconds_per_market: 300

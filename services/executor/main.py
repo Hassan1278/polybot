@@ -21,6 +21,7 @@ from polybot.logging import get_logger
 from polybot.models import AuditLog, Fill, Market
 from polybot.redis_bus import publish, xack, xautoclaim, xconsume, xdlq
 from polybot.runtime_config import current_mode, enabled_modes
+from services.executor.equity_guard import equity_guard_loop
 from services.executor.live import place_live
 from services.executor.paper import simulate_fill
 from services.executor.pnl_loop import pnl_loop
@@ -272,6 +273,7 @@ async def main() -> None:
         pnl_loop(),
         _pnl_loop_with_beacon(),
         _autoclaim_loop(),
+        equity_guard_loop(),
         run_health_server(_BEACON, port=8081),
     )
 
