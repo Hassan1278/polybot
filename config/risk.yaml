@@ -57,6 +57,14 @@ defaults:
     low_odds_price_threshold: 0.20
     low_odds_max_per_bet_usdc: 5
     max_per_category_usdc: 400
+    # Treat all correlated crypto MAJORS as ONE bet per direction and cap the
+    # GROSS same-direction notional across every crypto market. The per-market /
+    # per-asset / per-category caps don't bound aggregate directional exposure to
+    # the correlated complex — this does. Stops the book concentrating into a
+    # single "crypto up/down" thesis (e.g. the ~$200 of BTC-down + BTC-below-X +
+    # ETH-down that halved the account when BTC ran up). Tune to ~15-20% of
+    # equity. null disables.
+    max_crypto_factor_usdc: 100
     size_sigmoid_anchor: 0.6
     # Hold at most ONE outcome per market — block the bot from buying both
     # sides of the same event (a self-hedge that locks in a post-fee loss).
@@ -144,6 +152,8 @@ modes:
       max_position_usdc: 25                   # same as default; ceiling stays small
       max_open_positions: 30                  # well below paper's 200
       max_per_category_usdc: 250              # max ~$5k exposure per category
+      max_crypto_factor_usdc: 60              # ALL crypto = one directional bet;
+                                              # ~survivable fraction of a small acct
     drawdown:
       max_daily_loss_usdc: 100                # kill at -1% of $10k equity
     execution:

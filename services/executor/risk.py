@@ -354,6 +354,85 @@ async def _same_day_bucket_conflict(s, *, mode: str, market_id: str,
     return None
 
 
+async def _crypto_factor_exposure(s, *, mode: str, market_id: str,
+                                  outcome: str, side: str, size_usdc: float,
+                                  cap: float) -> tuple[str, float] | None:
+    """Cap GROSS notional on the correlated crypto directional factor.
+
+    Treats every crypto MAJOR as ONE bet per direction — they move together
+    (~0.85 intraday), so "BTC down" + "BTC below $X" + "ETH down" are one bet at
+    3x size, not three independent positions. Sums open same-direction crypto
+    notional and returns ``(want_dir, existing_usdc)`` if adding ``size_usdc``
+    would push the factor past ``cap``; else None.
+
+    This is what the per-market / per-asset / per-category caps miss: they bound a
+    single market or net a single asset, but nothing bounds the *aggregate
+    directional* exposure to the whole correlated complex — exactly the
+    concentration that can halve the account on one wrong call. Precision-biased:
+    None when the incoming order isn't a directional crypto-major bet (non-crypto,
+    no/multiple assets, memecoin, or a range-only / unparseable direction) so the
+    caller fails open. Only still-OPEN markets (``end_date`` in the future) count.
+    """
+    row = (await s.execute(
+        select(Market.question, Market.slug, Market.category)
+        .where(Market.market_id == market_id)
+    )).first()
+    if not row:
+        return None
+    q, slug, cat = row
+    if str(cat or "").lower() != "crypto":
+        return None
+    asset = asset_of(q, slug)
+    if asset is None or asset not in CRYPTO_MAJORS:
+        return None
+    want_dir = direction(q, slug, outcome, side)        # bull / bear / None
+    if want_dir is None:
+        return None
+
+    now = datetime.now(tz=timezone.utc)
+    if mode == "live":
+        rows = (await s.execute(
+            select(Fill.market_id, Market.question, Market.slug, Fill.outcome,
+                   Fill.side, Fill.notional_usdc)
+            .join(Market, Market.market_id == Fill.market_id)
+            .where(
+                Fill.mode == "live",
+                Fill.side == "BUY",
+                Fill.status.in_(("filled", "submitted", "partial")),
+                Market.category == "crypto",
+                Market.end_date > now,
+            )
+        )).all()
+        held = [(hmid, hq, hs, ho, hsd, float(hn or 0.0))
+                for (hmid, hq, hs, ho, hsd, hn) in rows]
+    else:
+        rows = (await s.execute(
+            select(Position.market_id, Market.question, Market.slug,
+                   Position.outcome, func.abs(Position.size_shares) * Position.avg_price)
+            .join(Market, Market.market_id == Position.market_id)
+            .where(
+                func.abs(Position.size_shares) > 0,
+                Market.category == "crypto",
+                Market.end_date > now,
+            )
+        )).all()
+        held = [(hmid, hq, hs, ho, "BUY", float(hn or 0.0))
+                for (hmid, hq, hs, ho, hn) in rows]
+
+    # Sum same-direction crypto-major notional (incl. this market's own open
+    # exposure — it's legitimately part of the factor total).
+    total = 0.0
+    for _hmid, hq, hs, ho, hsd, hn in held:
+        a = asset_of(hq, hs)
+        if a is None or a not in CRYPTO_MAJORS:
+            continue
+        if direction(hq, hs, ho, hsd) == want_dir:
+            total += hn
+    if total + size_usdc > cap:
+        return want_dir, total
+    return None
+
+
 async def _politics_candidate_held(s, *, mode: str, market_id: str) -> tuple[str, str] | None:
     """One-position-per-politics-candidate check.
 
@@ -612,6 +691,29 @@ async def preflight(*, mode: str, market_id: str, category: str | None,
                 asset, band, held_mid = bconf
                 raise RiskRejection(
                     f"crypto_bucket_conflict:{asset}_{band}:held={held_mid[:12]}")
+
+        # Crypto FACTOR exposure cap: treat all crypto majors as ONE bet per
+        # direction and bound the GROSS same-direction notional. The per-market,
+        # per-asset and per-category caps don't catch this — they bound a single
+        # market or net one asset, but nothing limits aggregate directional
+        # exposure to the whole correlated complex (BTC/ETH/... move together), so
+        # the bot could stack "BTC down" + "BTC below X" + "ETH down" into one
+        # outsized bet that halves the account on a single wrong call. Fail-OPEN on
+        # any error. null cap (max_crypto_factor_usdc) disables.
+        factor_cap = pos_cfg.get("max_crypto_factor_usdc")
+        if outcome and factor_cap is not None:
+            try:
+                fexp = await _crypto_factor_exposure(
+                    s, mode=order_mode, market_id=market_id, outcome=outcome,
+                    side=side, size_usdc=size_usdc, cap=float(factor_cap))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("crypto_factor_check_failed",
+                            market_id=market_id, err=str(exc))
+                fexp = None
+            if fexp:
+                want_dir, total = fexp
+                raise RiskRejection(
+                    f"crypto_factor_cap:{want_dir}:{total:.2f}+{size_usdc:.2f}>{factor_cap}")
 
         # One-position-per-EVENT: hold at most ONE market per Polymarket event,
         # so the bot can't take multiple (often offsetting) positions on the
