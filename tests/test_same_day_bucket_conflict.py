@@ -61,9 +61,15 @@ def _held_paper(rows):
 
 
 def _btc(lo, hi, day="June 21"):
-    """A daily BTC price-bucket market question + slug."""
+    """A daily BTC price-bucket (range) market question + slug."""
     return (f"Will Bitcoin be between ${lo:,} and ${hi:,} on {day}?",
             f"btc-{lo}-{hi}-{day.replace(' ', '').lower()}")
+
+
+def _btc_above(level, day="June 21"):
+    """A daily BTC threshold market question + slug."""
+    return (f"Will Bitcoin be above ${level:,} on {day}?",
+            f"btc-above-{level}-{day.replace(' ', '').lower()}")
 
 
 def _run(sess, *, mode="paper", market_id, outcome, side="BUY"):
@@ -99,6 +105,43 @@ def test_contradictory_yes_buckets_conflict():
     ])
     res = _run(sess, market_id="BTC_64_66", outcome="Yes", side="BUY")
     assert res is not None and res[0] == "BTC" and res[2] == "BTC_62_64"
+
+
+def test_threshold_vs_range_conflicts():
+    # The reported bug: hold "above 62k NO" (wins <=62k); new "between 60-62k NO"
+    # (wins <60k OR >62k) same day -> their win-regions cross -> blocked.
+    hq, hslug = _btc_above(62000)
+    iq, islug = _btc(60000, 62000)
+    sess = _Sess([
+        _incoming(iq, islug, D21),
+        _held_paper([(hq, hslug, "No", D21, "BTC_ABOVE_62")]),
+    ])
+    res = _run(sess, market_id="BTC_60_62", outcome="No", side="BUY")
+    assert res is not None and res[0] == "BTC" and res[2] == "BTC_ABOVE_62"
+
+
+def test_range_vs_threshold_conflicts_reverse_order():
+    # Same conflict with the legs swapped: hold the range, new order is the threshold.
+    hq, hslug = _btc(60000, 62000)
+    iq, islug = _btc_above(62000)
+    sess = _Sess([
+        _incoming(iq, islug, D21),
+        _held_paper([(hq, hslug, "No", D21, "BTC_60_62")]),
+    ])
+    res = _run(sess, market_id="BTC_ABOVE_62", outcome="No", side="BUY")
+    assert res is not None and res[0] == "BTC" and res[2] == "BTC_60_62"
+
+
+def test_nested_thresholds_allowed():
+    # "above 60k NO" (wins <=60k) is NESTED inside "above 62k NO" (wins <=62k):
+    # same bearish thesis, a refinement -> not a conflict.
+    hq, hslug = _btc_above(60000)
+    iq, islug = _btc_above(62000)
+    sess = _Sess([
+        _incoming(iq, islug, D21),
+        _held_paper([(hq, hslug, "No", D21, "BTC_ABOVE_60")]),
+    ])
+    assert _run(sess, market_id="BTC_ABOVE_62", outcome="No", side="BUY") is None
 
 
 def test_live_mode_conflict():

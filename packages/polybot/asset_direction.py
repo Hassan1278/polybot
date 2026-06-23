@@ -15,6 +15,7 @@ inference would wrongly block a legitimate trade, which is the costly error.
 
 from __future__ import annotations
 
+import math
 import re
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -182,3 +183,96 @@ def same_bracket(a: tuple[str, float, float], b: tuple[str, float, float],
         return abs(x - y) <= tol * max(abs(x), abs(y), 1.0)
 
     return close(alo, blo) and close(ahi, bhi)
+
+
+# --- Win-region model (threshold AND range, unified) -----------------------
+# A directional THRESHOLD bet ("above $X") and a volatility RANGE bet
+# ("between $A-$B") look like different axes, but they can still contradict:
+# holding "above 62k NO" (wins <=62k) alongside "between 60-62k NO" (wins <60k
+# OR >62k) is a self-hedge that bleeds fees. To compare ANY two crypto price
+# bets we reduce each to the set of final-price intervals where it WINS, then
+# check whether the two "cross" (each wins where the other loses).
+
+# A price level: $-prefixed (any magnitude) OR a k/m-suffixed number. Bare
+# integers (dates, years) are deliberately NOT matched — precision over recall.
+_PRICE_RE = re.compile(
+    r"\$\s*([\d,]+(?:\.\d+)?)\s*([km])?|([\d,]+(?:\.\d+)?)\s*([km])\b", re.I)
+
+
+def _threshold_price(text: str | None, *, tol: float = 0.005) -> float | None:
+    """The single price level named by a threshold market, or None.
+
+    Returns a value when every price-like token in the text agrees on ONE level
+    (within `tol` — the question and slug often both spell it, e.g. "$62,000" +
+    "62k"). Zero matches (no parseable level) or genuinely DIFFERENT levels (a
+    compound threshold) are ambiguous → None."""
+    prices: list[float] = []
+    for m in _PRICE_RE.finditer(text or ""):
+        val = (_to_number(m.group(1), m.group(2)) if m.group(1) is not None
+               else _to_number(m.group(3), m.group(4)))
+        if val is not None:
+            prices.append(val)
+    if not prices:
+        return None
+    lo, hi = min(prices), max(prices)
+    return prices[0] if hi - lo <= tol * max(abs(hi), 1.0) else None
+
+
+def win_region(question: str | None, slug: str | None,
+               outcome: str | None, side: str | None) -> list[tuple[float, float]] | None:
+    """Price intervals where buying/selling ``outcome`` WINS, or None when the
+    market isn't a parseable crypto price bet (fail-open, like its siblings).
+
+    Open ends use +/-inf. Range markets win inside ('in') or outside ('out') a
+    band; threshold markets win above ('bull') or below ('bear') a single level
+    — direction() supplies bull/bear and already applies the SELL flip."""
+    rng = range_bet(question, slug, outcome, side)
+    if rng is not None:
+        stance, lo, hi = rng
+        if stance == "in":
+            return [(lo, hi)]
+        return [(-math.inf, lo), (hi, math.inf)]
+    d = direction(question, slug, outcome, side)
+    if d is None:
+        return None
+    x = _threshold_price(f"{question or ''} {slug or ''}")
+    if x is None:
+        return None
+    return [(x, math.inf)] if d == "bull" else [(-math.inf, x)]
+
+
+def _subtract(a_list: list[tuple[float, float]],
+              b_list: list[tuple[float, float]]) -> list[tuple[float, float]]:
+    """A \\ B for two unions of intervals (inf-aware)."""
+    out: list[tuple[float, float]] = []
+    for lo, hi in a_list:
+        pieces = [(lo, hi)]
+        for blo, bhi in b_list:
+            nxt: list[tuple[float, float]] = []
+            for lo2, hi2 in pieces:
+                if bhi <= lo2 or blo >= hi2:        # no overlap
+                    nxt.append((lo2, hi2))
+                    continue
+                if blo > lo2:
+                    nxt.append((lo2, blo))
+                if bhi < hi2:
+                    nxt.append((bhi, hi2))
+            pieces = nxt
+        out.extend(pieces)
+    return out
+
+
+def regions_conflict(a: list[tuple[float, float]], b: list[tuple[float, float]],
+                     *, rel_tol: float = 0.005) -> bool:
+    """True if two win-regions CROSS — each wins on an interval (wider than a
+    relative tolerance) where the other loses. Nested / identical / refinement
+    regions never conflict. The tolerance mirrors same_bracket() so a daily band
+    reissue that differs by < rel_tol isn't flagged as a new conflicting band."""
+    scale = max((abs(p) for ivs in (a, b) for iv in ivs for p in iv if math.isfinite(p)),
+                default=1.0)
+    eps = rel_tol * max(scale, 1.0)
+
+    def has_wide(ivs: list[tuple[float, float]]) -> bool:
+        return any(hi - lo > eps for lo, hi in ivs)
+
+    return has_wide(_subtract(a, b)) and has_wide(_subtract(b, a))
