@@ -98,21 +98,38 @@ def _net_expr():
                          else_=-Trade.size_shares))
 
 
+def _union_wallets(wallet_lists) -> list[str]:
+    """Flatten BUY-signal wallet arrays into one deduped, lower-cased cluster,
+    preserving first-seen (newest-signal-first) order."""
+    seen: dict[str, None] = {}
+    for wallets in wallet_lists:
+        for w in (wallets or []):
+            if w:
+                seen.setdefault(str(w).lower(), None)
+    return list(seen)
+
+
 async def _entry_cluster(s, market_id: str, outcome: str) -> tuple[list[str], bool]:
-    """(cluster_wallets, is_fallback). Recover the original entry cluster from the
-    most recent BUY Signal on (market, outcome). Fall back to tracked active
-    wallets recently net-long the outcome when no Signal links our position."""
-    row = (await s.execute(
+    """(cluster_wallets, is_fallback). Recover the entry cluster from EVERY BUY
+    Signal on (market, outcome) within the net-lookback window — the UNION, not
+    just the most recent. A position is usually accumulated across several signals
+    with different wallets; keying the exit off only the latest signal would close
+    the whole position the moment that one sub-cluster reverses, even while an
+    earlier (often larger) cluster is still long. Bounding the signal lookup to the
+    same window we net "still long" over keeps every member's reversal test fair.
+    Fall back to tracked active wallets recently net-long the outcome when no Signal
+    links our position."""
+    since = datetime.now(tz=timezone.utc) - timedelta(days=_NET_LOOKBACK_DAYS)
+    rows = (await s.execute(
         select(Signal.wallets).where(
             Signal.market_id == market_id,
             func.upper(Signal.outcome) == outcome.upper(),
             Signal.side == "BUY",
-        ).order_by(Signal.ts.desc()).limit(1))).first()
-    if row and row[0]:
-        wallets = [str(w).lower() for w in row[0] if w]
-        if wallets:
-            return wallets, False
-    since = datetime.now(tz=timezone.utc) - timedelta(days=_NET_LOOKBACK_DAYS)
+            Signal.ts >= since,
+        ).order_by(Signal.ts.desc()))).all()
+    cluster = _union_wallets(r[0] for r in rows)
+    if cluster:
+        return cluster, False
     rows = (await s.execute(
         select(Trade.wallet, _net_expr())
         .join(Wallet, func.lower(Wallet.address) == func.lower(Trade.wallet))
