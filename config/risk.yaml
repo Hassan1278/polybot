@@ -126,8 +126,13 @@ defaults:
     # equity_guard.py) reads TRUE venue equity (cash + marked positions) each
     # minute, snapshots day-start equity, and trips the kill switch when intraday
     # drawdown exceeds this fraction. Reuses the /live/account data sources.
-    # Fail-safe: never trips on a failed read. Halt is manual-clear. 0/null off.
+    # Fail-safe: never trips on a failed read. 0/null off.
     max_daily_drawdown_pct: 0.15
+    # Auto-resume the breaker's OWN halt once intraday drawdown recovers to <=
+    # this fraction of the day's open. MUST be < max_daily_drawdown_pct (the gap
+    # is hysteresis that prevents flapping around the trip line). null/0 = no
+    # auto-resume (manual-clear only). Only equity_guard's own kills auto-clear.
+    resume_drawdown_pct: 0.10
 
   execution:
     cooldown_seconds_per_market: 300

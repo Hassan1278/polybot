@@ -8,7 +8,12 @@ pure, testable core.
 
 from __future__ import annotations
 
-from services.executor.equity_guard import _trading_day, drawdown_breached
+from services.executor.equity_guard import (
+    _trading_day,
+    breaker_action,
+    drawdown_breached,
+    drawdown_recovered,
+)
 
 
 def test_breaches_above_threshold():
@@ -44,3 +49,53 @@ def test_trading_day_is_iso_date():
     # Default reset hour 0 -> a plain ISO date string (YYYY-MM-DD).
     d = _trading_day(0)
     assert len(d) == 10 and d.count("-") == 2
+
+
+# ── drawdown_recovered (auto-resume threshold) ───────────────────────────────
+
+def test_recovered_at_resume_threshold():
+    # 10% below the open, resume line at 10% -> recovered (<=).
+    assert drawdown_recovered(100.0, 90.0, 0.10) is True
+
+
+def test_not_recovered_while_still_deep():
+    # 16% below the open, resume line 10% -> not yet.
+    assert drawdown_recovered(100.0, 84.0, 0.10) is False
+
+
+def test_recovered_when_above_open():
+    assert drawdown_recovered(100.0, 130.0, 0.10) is True
+
+
+def test_recovered_disabled_when_unset_or_bad_baseline():
+    assert drawdown_recovered(100.0, 90.0, None) is False
+    assert drawdown_recovered(100.0, 90.0, 0.0) is False
+    assert drawdown_recovered(0.0, 0.0, 0.10) is False
+
+
+# ── breaker_action (per-tick resume/trip/noop decision) ──────────────────────
+
+def test_action_trips_when_breached_and_unhalted():
+    assert breaker_action(None, breached=True, recovered=False) == "trip"
+
+
+def test_action_noop_when_calm_and_unhalted():
+    assert breaker_action(None, breached=False, recovered=False) == "noop"
+
+
+def test_action_resumes_our_kill_once_recovered():
+    k = "equity_drawdown:15.2%>=15%:baseline=291.00:now=247.00"
+    assert breaker_action(k, breached=False, recovered=True) == "resume"
+
+
+def test_action_holds_our_kill_until_recovered():
+    # Between the resume and trip lines -> stay halted, don't re-trip.
+    k = "equity_drawdown:12.0%>=15%:baseline=100.00:now=88.00"
+    assert breaker_action(k, breached=False, recovered=False) == "noop"
+
+
+def test_action_leaves_foreign_kill_untouched():
+    # A manual / other halt is never auto-cleared, even if recovered,
+    assert breaker_action("manual:operator", breached=False, recovered=True) == "noop"
+    # and we never trip on top of an existing foreign halt.
+    assert breaker_action("live_mode_no_creds", breached=True, recovered=False) == "noop"

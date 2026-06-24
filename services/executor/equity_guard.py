@@ -17,8 +17,11 @@ Fail-SAFE by construction:
   - NEVER trips on a failed/missing equity read — a flaky data API or sleeping
     sidecar must not be able to halt trading by itself, so a bad read just skips
     the tick.
-  - Trips the kill switch at most once per breach (no alert spam), and the halt
-    is MANUAL-clear — a big drawdown should get a human review before resuming.
+  - Trips the kill switch at most once per breach (no alert spam). The halt then
+    AUTO-CLEARS once equity recovers to within ``drawdown.resume_drawdown_pct`` of
+    the day's open (hysteresis vs the trip line); set that key null/0 to keep the
+    old manual-clear behavior. Only the breaker's OWN kills auto-clear — a manual
+    or other halt is left untouched.
 """
 
 from __future__ import annotations
@@ -35,7 +38,7 @@ from polybot.db import session_scope
 from polybot.logging import get_logger
 from polybot.models import WalletCredential
 from polybot.redis_bus import client as redis_client
-from polybot.redis_bus import kill_set, kill_status
+from polybot.redis_bus import kill_clear, kill_set, kill_status
 from polybot.runtime_config import enabled_modes, merged_risk
 
 log = get_logger(__name__)
@@ -51,6 +54,40 @@ def drawdown_breached(baseline: float, equity: float, pct: float) -> bool:
     if baseline <= 0:
         return False
     return (baseline - equity) / baseline >= pct
+
+
+def drawdown_recovered(baseline: float, equity: float, resume_pct: float | None) -> bool:
+    """True if equity has recovered to within ``resume_pct`` of ``baseline`` (or
+    risen above it). Never True when resume_pct is unset/<=0 or the baseline can't
+    define a drawdown — so auto-resume is off unless explicitly configured."""
+    if not resume_pct or resume_pct <= 0 or baseline <= 0:
+        return False
+    return (baseline - equity) / baseline <= resume_pct
+
+
+def breaker_action(current_kill: str | None, *, breached: bool, recovered: bool) -> str:
+    """Pure per-tick decision: ``'resume'`` | ``'trip'`` | ``'noop'``.
+
+    Only the breaker's OWN kill (reason prefixed ``equity_drawdown:``) auto-clears,
+    and only once equity has ``recovered``; a foreign/manual halt is never touched,
+    and we never trip on top of an existing halt."""
+    ours = bool(current_kill) and str(current_kill).startswith("equity_drawdown:")
+    if ours:
+        return "resume" if recovered else "noop"
+    if current_kill:
+        return "noop"
+    return "trip" if breached else "noop"
+
+
+def _resume_pct(dd_cfg: dict) -> float | None:
+    """The configured auto-resume threshold (fraction), or None when disabled."""
+    raw = dd_cfg.get("resume_drawdown_pct")
+    if raw in (None, "", 0, 0.0):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _f(v) -> float:
@@ -143,13 +180,38 @@ async def _tick() -> None:
         log.info("equity_guard_baseline_set", day_key=key, baseline=round(equity, 2))
         return
     baseline = _f(baseline_raw)
-    if not drawdown_breached(baseline, equity, pct):
+    if baseline <= 0:
+        return                                       # can't define a drawdown
+    drawdown = (baseline - equity) / baseline
+    current_kill = await kill_status()
+    action = breaker_action(
+        current_kill,
+        breached=drawdown_breached(baseline, equity, pct),
+        recovered=drawdown_recovered(baseline, equity, _resume_pct(dd_cfg)),
+    )
+
+    if action == "resume":
+        # Our own halt + equity recovered to within resume_drawdown_pct of the
+        # day's open → lift it and let trading continue. The gap to the trip line
+        # (resume_drawdown_pct < max_daily_drawdown_pct) is the anti-flap margin.
+        await kill_clear(by="equity_guard_auto")
+        log.info("equity_guard_auto_resume", drawdown=round(drawdown, 4),
+                 baseline=round(baseline, 2), now=round(equity, 2))
+        try:
+            await alerts.notify(
+                "warning",
+                "Equity drawdown breaker auto-cleared — trading resumed",
+                f"Real equity recovered to {drawdown * 100:.1f}% below today's open "
+                f"(${baseline:.2f} -> ${equity:.2f}); kill switch lifted automatically.",
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("equity_guard_resume_alert_failed")
         return
 
-    # Breach. Trip the kill switch ONCE — skip if something already halted us.
-    if await kill_status():
-        return
-    drawdown = (baseline - equity) / baseline
+    if action != "trip":
+        return                                       # holding below the line, or a foreign halt
+
+    # Breach, and nothing else has halted us → trip the kill switch ONCE.
     reason = (f"equity_drawdown:{drawdown * 100:.1f}%>={pct * 100:.0f}%:"
               f"baseline={baseline:.2f}:now={equity:.2f}")
     log.error("equity_guard_breach", reason=reason)
@@ -159,8 +221,8 @@ async def _tick() -> None:
             "critical",
             "Equity drawdown breaker tripped — trading halted",
             f"Real equity fell {drawdown * 100:.1f}% today "
-            f"(${baseline:.2f} -> ${equity:.2f}); kill switch is ON. "
-            f"Review and clear it manually when ready.",
+            f"(${baseline:.2f} -> ${equity:.2f}); kill switch is ON. It will "
+            f"auto-clear once equity recovers, or clear it manually.",
         )
     except Exception:  # noqa: BLE001
         log.exception("equity_guard_alert_failed")
