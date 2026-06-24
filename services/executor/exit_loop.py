@@ -211,7 +211,8 @@ async def _flag_dissolving(market_id: str, outcome: str, cfg: dict) -> None:
         log.warning("thesis_dissolving_flag_failed", market=market_id, outcome=outcome)
 
 
-async def _exit_signal(market_id: str, outcome: str, cluster: list[str]) -> int | None:
+async def _exit_signal(market_id: str, outcome: str, cluster: list[str],
+                       notes: str = "exit_mirror") -> int | None:
     """Write a SELL Signal row for provenance/PnL; returns its id (or None)."""
     try:
         async with session_scope() as s:
@@ -220,7 +221,7 @@ async def _exit_signal(market_id: str, outcome: str, cluster: list[str]) -> int 
                 outcome=outcome, side="SELL", wallet_count=len(cluster),
                 wallets=cluster, avg_win_rate=0.0, correlation_score=0.0,
                 target_price=0.0, target_size_usdc=0.0, gate_results={},
-                gate_pass=True, executed=False, notes="exit_mirror",
+                gate_pass=True, executed=False, notes=notes,
             )
             s.add(sig)
             await s.flush()
@@ -230,16 +231,19 @@ async def _exit_signal(market_id: str, outcome: str, cluster: list[str]) -> int 
         return None
 
 
-async def _do_close(market_id: str, outcome: str, cluster: list[str],
-                    is_fallback: bool, cfg: dict) -> None:
+async def do_close(market_id: str, outcome: str, *, notes: str, live_ok: bool,
+                   cooldown: int, cluster: list[str] | tuple = (),
+                   skip_event: str = "exit_skip_live_disabled") -> None:
+    """Shared exit executor. ONE close per (mode, market, outcome) per cooldown
+    window (Redis NX marker — the SAME key gates every trigger and both sweeps, so
+    cluster/price/sentiment exits can never double-close). Live is gated by
+    ``live_ok`` (logged as ``skip_event`` when blocked); paper always shadow-runs.
+    ``notes`` tags the provenance SELL Signal (e.g. "exit_mirror", "exit_take_profit")."""
     modes = await enabled_modes()
-    live_enabled = bool(cfg.get("live_enabled", False))
-    live_on_fallback = bool(cfg.get("live_exit_on_fallback", False))
-    cooldown = max(30, int(cfg.get("cooldown_seconds", 300)))
+    cooldown = max(30, int(cooldown))
     r = redis_client()
     for mode in sorted(modes):
         # Idempotency: ONE close per (mode, market, outcome) per cooldown window.
-        # The SAME key gates the event path and the backstop sweep (mutual excl.).
         key = _PENDING_KEY.format(mode=mode, mid=market_id, oc=outcome.upper())
         try:
             acquired = await r.set(key, "1", nx=True, ex=cooldown)
@@ -249,24 +253,39 @@ async def _do_close(market_id: str, outcome: str, cluster: list[str],
             continue
         try:
             if mode == "live":
-                if not live_enabled:
-                    log.info("exit_skip_live_disabled", market=market_id, outcome=outcome)
+                if not live_ok:
+                    log.info(skip_event, market=market_id, outcome=outcome, notes=notes)
                     continue
-                if is_fallback and not live_on_fallback:
-                    log.info("exit_skip_live_fallback", market=market_id, outcome=outcome)
-                    continue
-                sid = await _exit_signal(market_id, outcome, cluster)
+                sid = await _exit_signal(market_id, outcome, list(cluster), notes=notes)
                 res = await close_live(market_id=market_id, outcome=outcome, signal_id=sid)
             else:
                 res = await close_paper(market_id=market_id, outcome=outcome)
             log.info("exit_close_done", mode=mode, market=market_id, outcome=outcome,
-                     status=(res or {}).get("status"), is_fallback=is_fallback)
+                     status=(res or {}).get("status"), notes=notes)
         except Exception:  # noqa: BLE001
             log.exception("exit_close_failed", mode=mode, market=market_id, outcome=outcome)
             try:                                        # release marker so a sweep can retry
                 await r.delete(key)
             except Exception:  # noqa: BLE001
                 pass
+
+
+async def _do_close(market_id: str, outcome: str, cluster: list[str],
+                    is_fallback: bool, cfg: dict) -> None:
+    """exit_mirror's close: derive live-gating from the cluster's provenance
+    (inferred clusters never auto-sell live) and delegate to do_close, preserving
+    the distinct exit_skip_live_disabled / exit_skip_live_fallback observability."""
+    live_enabled = bool(cfg.get("live_enabled", False))
+    live_on_fallback = bool(cfg.get("live_exit_on_fallback", False))
+    if not live_enabled:
+        live_ok, skip_event = False, "exit_skip_live_disabled"
+    elif is_fallback and not live_on_fallback:
+        live_ok, skip_event = False, "exit_skip_live_fallback"
+    else:
+        live_ok, skip_event = True, "exit_skip_live_disabled"
+    await do_close(market_id, outcome, notes="exit_mirror", live_ok=live_ok,
+                   cooldown=int(cfg.get("cooldown_seconds", 300)),
+                   cluster=cluster, skip_event=skip_event)
 
 
 # ── loop + sweep ─────────────────────────────────────────────────────────────

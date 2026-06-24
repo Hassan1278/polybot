@@ -163,6 +163,26 @@ defaults:
     allow_close_when_killed: true  # a close may bypass the kill switch (closing de-risks)
     quality_window: "30d"          # WalletStats window for cluster quality weights
 
+  # Price/PnL + asset-level sharp-sentiment exits (services/executor/exit_rules.py)
+  # for the short-dated crypto book, where exit_mirror's same-market cluster is empty.
+  # Evaluated on a fast sweep; every held leg logs `exit_rule_eval` (never silent).
+  exit_rules:
+    enabled: true
+    price_live_enabled: true          # price/PnL exits close LIVE (deterministic, protective)
+    take_profit_pct: 0.50             # close a leg once it's up >= 50% on the mark
+    stop_loss_pct: 0.50               # close a leg once it's down >= 50%
+    thesis_invalidation_mark: 0.20    # close if our leg's implied win-prob falls to/below this
+    flatten_before_expiry_hours: 1.0  # flatten any leg within this many hours of resolution
+    min_close_notional_usdc: 2.0      # ignore dust legs (closing them just bleeds fees)
+    sentiment_live_enabled: false     # SHADOW first — log only, no live close (sentiment is noisy)
+    sentiment_against_threshold: 0.65 # exit when quality-weighted sharp sentiment is >= this against us
+    sentiment_min_sharps: 5           # require at least this many positioned sharps on the asset
+    sentiment_lookback_hours: 24      # how far back to net sharp sentiment
+    sentiment_max_stats_age_hours: 36 # don't act on sentiment if wallet stats are staler than this
+    quality_window: "30d"             # WalletStats window for sharp quality weights
+    cooldown_seconds: 300             # one close per (mode, market, outcome) per window
+    sweep_seconds: 60                 # price/sentiment re-check cadence (faster than exit_mirror)
+
   live_only:
     require_kill_switch_check: true
     require_admin_token_for_size_above_usdc: 100
