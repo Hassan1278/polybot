@@ -41,6 +41,9 @@ from services.executor.equity_guard import _deposit_wallet
 # Activity is paged; pull until a short page or this many events (safety cap).
 _PAGE = 500
 _MAX_EVENTS = 8000
+# A held leg at/under this implied price with ~no market value is a market that
+# resolved AGAINST us — a decided loss, not open risk.
+_RESOLVED_MARK = 0.02
 
 
 def _f(v: Any) -> float:
@@ -137,10 +140,40 @@ def realized_from_activity(events: list[dict]) -> dict[str, dict]:
     return st
 
 
-async def _fetch_activity(client: DataClient, wallet: str) -> list[dict]:
+def cashflow_totals(events: list[dict]) -> dict:
+    """Total cash IN / OUT across all activity, double-count-proof.
+
+    Account PnL doesn't need buys matched to their sells/redeems: every dollar
+    that left for a BUY is cash out, every dollar from a SELL or REDEEM is cash
+    in, and whatever's still held is current open value. So
+        net = (sells + redeems + open_value) - buys
+    holds regardless of how the venue keys redeems vs the original buy tokens
+    (the mismatch that breaks per-token matching). Pure / unit tested."""
+    buys = sells = redeems = 0.0
+    for e in events:
+        typ, side, usdc = e["type"], e["side"], e["usdc"]
+        if usdc <= 0:
+            continue
+        if typ == "TRADE" and side == "BUY":
+            buys += usdc
+        elif typ == "TRADE" and side == "SELL":
+            sells += usdc
+        elif typ == "REDEEM":
+            redeems += usdc
+    return {"buys": buys, "sells": sells, "redeems": redeems}
+
+
+async def _fetch_activity(client: DataClient, wallet: str) -> tuple[list[dict], bool]:
+    """Returns (events, hit_cap). hit_cap=True means we stopped at _MAX_EVENTS
+    with more history available — older BUYs may be missing, so the cashflow
+    total would read optimistically and the caller should warn."""
     out: list[dict] = []
     offset = 0
-    while len(out) < _MAX_EVENTS:
+    hit_cap = False
+    while True:
+        if len(out) >= _MAX_EVENTS:
+            hit_cap = True
+            break
         try:
             rows = await client.activity(wallet, limit=_PAGE, offset=offset)
         except Exception as exc:  # noqa: BLE001
@@ -152,7 +185,7 @@ async def _fetch_activity(client: DataClient, wallet: str) -> list[dict]:
         if len(rows) < _PAGE:
             break
         offset += _PAGE
-    return out
+    return out, hit_cap
 
 
 async def _fetch_positions(client: DataClient, wallet: str) -> list[dict]:
@@ -180,7 +213,7 @@ async def main(argv: list[str]) -> None:
 
     client = DataClient()
     try:
-        raw_activity = await _fetch_activity(client, wallet)
+        raw_activity, hit_cap = await _fetch_activity(client, wallet)
         raw_positions = await _fetch_positions(client, wallet)
     finally:
         await client.close()
@@ -194,7 +227,6 @@ async def main(argv: list[str]) -> None:
         cutoff_ts = newest - int(since_h * 3600)
 
     book = realized_from_activity(events)
-    open_assets = {str(p.get("asset") or "") for p in raw_positions if _f(p.get("size")) > 0}
 
     # ── bucket 1: round-trips the bot closed by SELLING ──────────────────────
     sold = [s for s in book.values() if s["sold_shares"] > 1e-6]
@@ -257,62 +289,89 @@ async def main(argv: list[str]) -> None:
     else:
         print("  (none redeemed)")
 
-    # ── bucket 3: still-open positions, marked now (unrealized) ──────────────
-    opens = []
-    net_unreal = 0.0
+    # ── bucket 3: positions still in the wallet ──────────────────────────────
+    # Split GENUINELY-OPEN (still trading, has market value) from RESOLVED-
+    # AGAINST-US (market settled, this side -> 0, shares now worthless but not
+    # yet cleared). The data API flags both with size>0; the worthless ones show
+    # curPrice~0 / value~0 (and usually redeemable). Lumping them as "unrealized"
+    # (the bug in v1 of this script) makes decided losses look like open risk.
+    live_open, resolved_lost = [], []
+    open_value = open_upnl = resolved_loss = 0.0
     for p in raw_positions:
         sz = _f(p.get("size"))
         if sz <= 0:
             continue
-        cash_pnl = _f(p.get("cashPnl"))
-        net_unreal += cash_pnl
-        opens.append({
+        row = {
             "title": str(p.get("title") or p.get("slug") or "?"),
             "outcome": str(p.get("outcome") or ""),
             "size": sz, "avg": _f(p.get("avgPrice")), "mark": _f(p.get("curPrice")),
-            "value": _f(p.get("currentValue")), "upnl": cash_pnl,
+            "value": _f(p.get("currentValue")), "upnl": _f(p.get("cashPnl")),
             "redeemable": bool(p.get("redeemable")),
-        })
-    opens.sort(key=lambda x: x["upnl"])
-    print(f"\n3) STILL OPEN  (marked-to-market now, UNREALIZED)  —  {len(opens)} leg(s)")
-    if opens:
+        }
+        decided = row["redeemable"] or (row["mark"] <= _RESOLVED_MARK and row["value"] <= 0.01)
+        if decided and row["upnl"] < 0:
+            resolved_lost.append(row)
+            resolved_loss += row["upnl"]
+        else:
+            live_open.append(row)
+            open_value += row["value"]
+            open_upnl += row["upnl"]
+
+    live_open.sort(key=lambda x: x["upnl"])
+    print(f"\n3) STILL OPEN — genuinely live, marked now (UNREALIZED)  —  {len(live_open)} leg(s)")
+    if live_open:
         print(f"{'-'*84}")
-        print(f"{'market':<42}{'shares':>8}{'avg':>7}{'mark':>7}{'value':>9}{'uPnL':>9}  flag")
-        for o in opens:
-            flag = "redeemable" if o["redeemable"] else ""
-            print(f"{_fmt_title(o['title'], o['outcome'], 42)}"
+        print(f"{'market':<44}{'shares':>8}{'avg':>7}{'mark':>7}{'value':>9}{'uPnL':>9}")
+        for o in live_open:
+            print(f"{_fmt_title(o['title'], o['outcome'], 44)}"
                   f"{o['size']:>8.1f}{o['avg']:>7.3f}{o['mark']:>7.3f}"
-                  f"{o['value']:>9.2f}{o['upnl']:>+9.2f}  {flag}")
+                  f"{o['value']:>9.2f}{o['upnl']:>+9.2f}")
         print(f"{'-'*84}")
-        print(f"  NET UNREALIZED = ${net_unreal:+.2f}")
+        print(f"  NET UNREALIZED (open risk) = ${open_upnl:+.2f}   "
+              f"(marked value ${open_value:.2f})")
     else:
-        print("  (no open positions)")
+        print("  (no genuinely-open positions)")
 
-    # ── reconciliation: bought, then vanished with no SELL/REDEEM = lost ─────
-    ghosts = [s for a, s in book.items()
-              if s["open_shares"] > 1e-6 and a not in open_assets]
-    ghost_loss = sum(s["open_cost"] for s in ghosts)
-    if ghosts:
-        print(f"\n⚠  {len(ghosts)} leg(s) were bought but are GONE with no sell/redeem "
-              f"— resolved worthless.")
-        print(f"   Estimated realized LOSS (cost basis written off): -${ghost_loss:.2f}")
-        for s in sorted(ghosts, key=lambda x: -x["open_cost"])[:8]:
-            print(f"     {_fmt_title(s['title'], s['outcome'], 50)}  "
-                  f"{s['open_shares']:.1f} sh  cost ${s['open_cost']:.2f}")
+    # ── bucket 4: resolved against us (already-decided losses) ───────────────
+    resolved_lost.sort(key=lambda x: x["upnl"])
+    print(f"\n4) RESOLVED AGAINST US — already-decided losses (NOT open risk)  —  "
+          f"{len(resolved_lost)} leg(s)")
+    if resolved_lost:
+        print(f"{'-'*84}")
+        print(f"{'market':<52}{'shares':>8}{'cost/loss':>12}")
+        for o in resolved_lost[:25]:
+            print(f"{_fmt_title(o['title'], o['outcome'], 52)}"
+                  f"{o['size']:>8.1f}{o['upnl']:>+12.2f}")
+        if len(resolved_lost) > 25:
+            print(f"     … and {len(resolved_lost) - 25} more")
+        print(f"{'-'*84}")
+        print(f"  REALIZED LOSS FROM RESOLVED POSITIONS = ${resolved_loss:+.2f}")
+    else:
+        print("  (none)")
 
-    # ── grand total ──────────────────────────────────────────────────────────
-    net_sold_all = sum(s["sold_realized"] for s in book.values())
-    net_red_all = sum(s["redeemed_realized"] for s in book.values())
-    total_realized = net_sold_all + net_red_all - ghost_loss
+    # ── grand total: clean all-cashflow method (double-count-proof) ──────────
+    cf = cashflow_totals(events)
+    net = cf["sells"] + cf["redeems"] + open_value - cf["buys"]
+    oldest = min((e["ts"] for e in events), default=0)
     print(f"\n{'='*84}")
-    print(f"TOTAL  realized(sells) ${net_sold_all:+.2f}  |  settled ${net_red_all:+.2f}  |  "
-          f"expired-loss ${-ghost_loss:+.2f}")
-    print(f"       => NET REALIZED ${total_realized:+.2f}   "
-          f"+ open/unrealized ${net_unreal:+.2f}   "
-          f"= ${total_realized + net_unreal:+.2f}")
+    print("BOTTOM LINE  (cash-flow method — immune to the redeem/buy keying issue)")
+    print(f"  cash OUT (buys)              -${cf['buys']:.2f}")
+    print(f"  cash IN  (sells)            +${cf['sells']:.2f}")
+    print(f"  cash IN  (redeems/settle)   +${cf['redeems']:.2f}")
+    print(f"  value of still-open legs    +${open_value:.2f}")
+    print(f"  {'-'*44}")
+    print(f"  NET P&L on traded capital    ${net:+.2f}")
     print('='*84)
-    print("\nNote: prices/PnL are the venue's ACTUAL executions, not the local Fill\n"
-          "ledger (which records quoted prices and is never reconciled in live mode).")
+    if hit_cap:
+        print(f"\n⚠  Hit the {_MAX_EVENTS}-event scan cap — older BUYs may be missing, so the\n"
+              "   NET above reads OPTIMISTICALLY. Raise _MAX_EVENTS for a full-history total.")
+    print(f"\n{len(events)} activity events scanned"
+          + (f"; oldest ts={oldest}" if oldest else "") + ".")
+    print("Buckets 1–4 are detail (note: the venue keys REDEEM under a different token\n"
+          "than the original BUY, so bucket-2 wins can also surface as a buy with no\n"
+          "matching sell — the cash-flow BOTTOM LINE avoids that and is authoritative).")
+    print("All figures are the venue's ACTUAL executions, not the local Fill ledger\n"
+          "(which records quoted prices and is never reconciled in live mode).")
 
 
 if __name__ == "__main__":

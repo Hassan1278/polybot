@@ -7,7 +7,7 @@ pure average-cost accounting (`realized_from_activity`) and the row normaliser
 
 from __future__ import annotations
 
-from scripts.live_pnl import _norm, realized_from_activity
+from scripts.live_pnl import _norm, cashflow_totals, realized_from_activity
 
 
 def _ev(typ, side, shares, usdc, asset="T1", ts=0, title="Mkt", outcome="Yes"):
@@ -121,3 +121,39 @@ def test_oversell_guard_never_goes_negative_shares():
     s = book["T1"]
     assert s["open_shares"] == 0.0
     assert s["sold_shares"] == 50.0
+
+
+# ── cashflow_totals (double-count-proof account total) ───────────────────────
+
+def test_cashflow_totals_sums_by_type():
+    cf = cashflow_totals([
+        _ev("TRADE", "BUY", 100, 40.0),
+        _ev("TRADE", "BUY", 50, 30.0),
+        _ev("TRADE", "SELL", 80, 60.0),
+        _ev("REDEEM", "", 70, 70.0),
+    ])
+    assert cf["buys"] == 70.0
+    assert cf["sells"] == 60.0
+    assert cf["redeems"] == 70.0
+
+
+def test_cashflow_total_matches_real_pnl_despite_redeem_key_mismatch():
+    # The venue logs a winning REDEEM under a DIFFERENT token id than the BUY.
+    # Per-token matching would split it into a phantom loss + a cost-0 win, but
+    # the cashflow net = sells + redeems + open_value - buys is still correct.
+    events = [
+        _ev("TRADE", "BUY", 100, 45.0, asset="BUY_TOKEN"),   # paid 45
+        _ev("REDEEM", "", 100, 100.0, asset="REDEEM_TOKEN"),  # got 100 (won)
+    ]
+    cf = cashflow_totals(events)
+    net = cf["sells"] + cf["redeems"] + 0.0 - cf["buys"]
+    assert round(net, 6) == 55.0          # true PnL, no double count
+
+
+def test_cashflow_ignores_nonpositive_notional():
+    cf = cashflow_totals([
+        _ev("TRADE", "BUY", 0, 0.0),
+        _ev("TRADE", "SELL", 10, 5.0),
+    ])
+    assert cf["buys"] == 0.0
+    assert cf["sells"] == 5.0
