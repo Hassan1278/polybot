@@ -174,10 +174,10 @@ defaults:
     thesis_invalidation_mark: 0.20    # close if our leg's implied win-prob falls to/below this
     flatten_before_expiry_hours: 1.0  # flatten any leg within this many hours of resolution
     min_close_notional_usdc: 2.0      # ignore dust legs (closing them just bleeds fees)
-    sentiment_live_enabled: false     # SHADOW first — log only, no live close (sentiment is noisy)
+    sentiment_live_enabled: true      # live exits on a sharp-sentiment reversal (operator-enabled)
     sentiment_against_threshold: 0.65 # exit when quality-weighted sharp sentiment is >= this against us
-    sentiment_min_sharps: 5           # require at least this many positioned sharps on the asset
-    sentiment_lookback_hours: 24      # how far back to net sharp sentiment
+    sentiment_min_sharps: 3           # min positioned sharps on the ASSET; matches entry's correlation min_wallets (3)
+    sentiment_lookback_hours: 6       # net RECENT sharp sentiment (short window ~ entry timescale, less lag)
     sentiment_max_stats_age_hours: 36 # don't act on sentiment if wallet stats are staler than this
     quality_window: "30d"             # WalletStats window for sharp quality weights
     cooldown_seconds: 300             # one close per (mode, market, outcome) per window
