@@ -163,6 +163,49 @@ def cashflow_totals(events: list[dict]) -> dict:
     return {"buys": buys, "sells": sells, "redeems": redeems}
 
 
+def windowed_realized(events: list[dict], since_ts: int) -> dict:
+    """Realized PnL booked by SELL vs REDEEM events at/after ``since_ts``.
+
+    Replays the FULL history to carry the correct average cost into the window
+    (a leg bought yesterday and sold today must realise against yesterday's
+    cost), but only TALLIES realized for events inside the window. This is the
+    causal split for "what changed recently": SELL realized = the active exit
+    logic doing work (the old exit path was a no-op, so this is attributable to
+    it); REDEEM realized = positions that merely settled on their own. Pure."""
+    st: dict[str, dict] = {}
+    sell_realized = redeem_realized = 0.0
+    n_sells = n_redeems = 0
+    for ev in sorted(events, key=lambda e: e["ts"]):
+        asset = ev["asset"]
+        if not asset:
+            continue
+        s = st.setdefault(asset, {"shares": 0.0, "cost": 0.0})
+        typ, side, shares, usdc = ev["type"], ev["side"], ev["shares"], ev["usdc"]
+        if shares <= 0:
+            continue
+        if typ == "TRADE" and side == "BUY":
+            s["shares"] += shares
+            s["cost"] += usdc
+            continue
+        is_sell = typ == "TRADE" and side == "SELL"
+        if not (is_sell or typ == "REDEEM"):
+            continue                                 # ignore SPLIT/MERGE/REWARD/etc.
+        avg = (s["cost"] / s["shares"]) if s["shares"] > 1e-9 else 0.0
+        removed = min(shares, s["shares"]) if s["shares"] > 0 else shares
+        realized = usdc - avg * removed
+        s["shares"] = max(0.0, s["shares"] - removed)
+        s["cost"] = max(0.0, s["cost"] - avg * removed)
+        if ev["ts"] >= since_ts:
+            if is_sell:
+                sell_realized += realized
+                n_sells += 1
+            else:
+                redeem_realized += realized
+                n_redeems += 1
+    return {"sell_realized": sell_realized, "redeem_realized": redeem_realized,
+            "n_sells": n_sells, "n_redeems": n_redeems}
+
+
 async def _fetch_activity(client: DataClient, wallet: str) -> tuple[list[dict], bool]:
     """Returns (events, hit_cap). hit_cap=True means we stopped at _MAX_EVENTS
     with more history available — older BUYs may be missing, so the cashflow
@@ -244,6 +287,21 @@ async def main(argv: list[str]) -> None:
         print(f"(showing closed legs with activity in the last {since_h:g}h; "
               f"PnL still computed over full history)")
     print('='*84)
+
+    # ── windowed attribution: what moved the account in the last N hours ─────
+    if since_h > 0:
+        w = windowed_realized(events, cutoff_ts)
+        booked = w["sell_realized"] + w["redeem_realized"]
+        print(f"\nLAST {since_h:g}h — what the bot actually BOOKED (realized cash)")
+        print(f"  by SELLING  (the new exit logic at work):  ${w['sell_realized']:+.2f}"
+              f"   over {w['n_sells']} close(s)")
+        print(f"  by REDEEM   (positions settling on their own): ${w['redeem_realized']:+.2f}"
+              f"   over {w['n_redeems']} settlement(s)")
+        print(f"  {'-'*44}")
+        print(f"  total realized in window:                  ${booked:+.2f}")
+        print("  → SELLING is attributable to OUR changes (the old exit path never\n"
+              "    fired). REDEEM + any further equity move is positions playing out\n"
+              "    / open legs re-marking (unrealized drift), NOT the exit changes.")
 
     print(f"\n1) ROUND-TRIPS THE BOT CLOSED BY SELLING  (BUY → SELL)  —  {len(sold)} leg(s)")
     if sold:

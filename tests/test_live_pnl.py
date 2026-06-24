@@ -7,7 +7,12 @@ pure average-cost accounting (`realized_from_activity`) and the row normaliser
 
 from __future__ import annotations
 
-from scripts.live_pnl import _norm, cashflow_totals, realized_from_activity
+from scripts.live_pnl import (
+    _norm,
+    cashflow_totals,
+    realized_from_activity,
+    windowed_realized,
+)
 
 
 def _ev(typ, side, shares, usdc, asset="T1", ts=0, title="Mkt", outcome="Yes"):
@@ -157,3 +162,39 @@ def test_cashflow_ignores_nonpositive_notional():
     ])
     assert cf["buys"] == 0.0
     assert cf["sells"] == 5.0
+
+
+# ── windowed_realized (recent attribution: sells vs settlements) ─────────────
+
+def test_windowed_counts_only_in_window_but_carries_full_cost():
+    # Bought BEFORE the window @ .40, sold INSIDE the window @ .60. The realized
+    # +20 must be tallied (sell in window) against the pre-window cost.
+    w = windowed_realized([
+        _ev("TRADE", "BUY", 100, 40.0, ts=100),
+        _ev("TRADE", "SELL", 100, 60.0, ts=200),
+    ], since_ts=150)
+    assert round(w["sell_realized"], 6) == 20.0
+    assert w["n_sells"] == 1
+    assert w["redeem_realized"] == 0.0
+
+
+def test_windowed_excludes_sells_before_cutoff():
+    w = windowed_realized([
+        _ev("TRADE", "BUY", 100, 40.0, ts=10),
+        _ev("TRADE", "SELL", 100, 60.0, ts=20),   # before cutoff -> ignored
+    ], since_ts=100)
+    assert w["sell_realized"] == 0.0
+    assert w["n_sells"] == 0
+
+
+def test_windowed_separates_sells_from_redeems():
+    # One active SELL (+20) and one passive REDEEM (+55) both in-window.
+    w = windowed_realized([
+        _ev("TRADE", "BUY", 100, 40.0, asset="A", ts=1),
+        _ev("TRADE", "SELL", 100, 60.0, asset="A", ts=2),
+        _ev("TRADE", "BUY", 100, 45.0, asset="B", ts=1),
+        _ev("REDEEM", "", 100, 100.0, asset="B", ts=2),
+    ], since_ts=0)
+    assert round(w["sell_realized"], 6) == 20.0
+    assert round(w["redeem_realized"], 6) == 55.0
+    assert w["n_sells"] == 1 and w["n_redeems"] == 1
