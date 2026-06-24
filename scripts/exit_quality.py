@@ -109,9 +109,16 @@ async def main(argv: list[str]) -> None:
             except Exception:  # noqa: BLE001
                 mark = -1.0
             a_in, a_out, sh = s["avg_in"], s["avg_out"], s["sold_shares"]
+            peak = s["peak_shares"]
             asm = exit_assessment(a_in, a_out, mark, sh)
+            # If we sold materially MORE cumulatively than we ever held at once,
+            # the bot traded in and out of this token repeatedly: `sold_shares`
+            # is total volume, not a holdable position, so the hold-to-resolution
+            # counterfactual is meaningless. Flag and exclude from the headline.
+            round_tripped = sh > 1.25 * peak + 1e-9
             legs.append({
                 "title": s["title"], "outcome": s["outcome"], "shares": sh,
+                "peak": peak, "trips": s["n_sells"], "round_tripped": round_tripped,
                 "avg_in": a_in, "avg_out": a_out, "mark": mark,
                 "label": outcome_label(mark), **asm,
             })
@@ -119,70 +126,77 @@ async def main(argv: list[str]) -> None:
         await clob.close()
 
     legs.sort(key=lambda x: x["edge"])           # most "sold too early" first
+    clean = [x for x in legs if x["mark"] >= 0 and not x["round_tripped"]]
+    rolled = [x for x in legs if x["round_tripped"]]
 
-    print(f"\n{'='*92}")
+    print(f"\n{'='*96}")
     print("EXIT QUALITY — did selling beat holding?   (edge = (sold_price - mark_now) * shares)")
     if since_h > 0:
         print(f"(sells in the last {since_h:g}h)")
-    print('='*92)
-    print(f"{'market':<40}{'shares':>7}{'in':>6}{'sold':>6}{'now':>6}{'end':>7}"
-          f"{'realized':>10}{'edge':>9}")
-    print('-'*92)
+    print('='*96)
+    print(f"{'market':<38}{'sold':>7}{'peak':>7}{'trips':>6}{'in':>6}{'out':>6}{'now':>6}"
+          f"{'end':>6}{'realized':>9}{'edge':>9}")
+    print('-'*96)
     for x in legs:
         mk = f"{x['mark']:.3f}" if x["mark"] >= 0 else "  ?  "
-        print(f"{_fmt_title(x['title'], x['outcome'], 40)}{x['shares']:>7.1f}"
-              f"{x['avg_in']:>6.2f}{x['avg_out']:>6.2f}{mk:>6}{x['label']:>7}"
-              f"{x['realized']:>+10.2f}{x['edge']:>+9.2f}")
+        flag = " ↺" if x["round_tripped"] else ""
+        print(f"{_fmt_title(x['title'], x['outcome'], 38)}{x['shares']:>7.0f}{x['peak']:>7.0f}"
+              f"{x['trips']:>6}{x['avg_in']:>6.2f}{x['avg_out']:>6.2f}{mk:>6}{x['label']:>6}"
+              f"{x['realized']:>+9.2f}{x['edge']:>+9.2f}{flag}")
 
-    realized_total = sum(x["realized"] for x in legs)
-    edge_total = sum(x["edge"] for x in legs if x["mark"] >= 0)
-    hold_total = sum(x["hold_pnl"] for x in legs if x["mark"] >= 0)
-    left_on_table = sum(x["edge"] for x in legs if x["mark"] >= 0 and x["edge"] < 0)
-    saved = sum(x["edge"] for x in legs if x["mark"] >= 0 and x["edge"] > 0)
-    n_premature = sum(1 for x in legs if x["mark"] >= 0 and x["edge"] < 0)
-    n_good = sum(1 for x in legs if x["mark"] >= 0 and x["edge"] > 0)
+    edge_total = sum(x["edge"] for x in clean)
+    realized_total = sum(x["realized"] for x in clean)
+    hold_total = sum(x["hold_pnl"] for x in clean)
+    left_on_table = sum(x["edge"] for x in clean if x["edge"] < 0)
+    saved = sum(x["edge"] for x in clean if x["edge"] > 0)
+    n_premature = sum(1 for x in clean if x["edge"] < 0)
+    n_good = sum(1 for x in clean if x["edge"] > 0)
     n_unknown = sum(1 for x in legs if x["mark"] < 0)
-    n_zero = sum(1 for x in legs if 0.0 <= x["mark"] <= 1e-9)
 
-    # The killer case to expose: legs cut at a LOSS that then went on to WIN.
-    cut_loss_that_won = [x for x in legs if x["label"] == "won" and x["avg_out"] <= x["avg_in"]]
+    # Killer case, restricted to CLEAN legs: cut at a loss, then went on to win.
+    cut_loss_that_won = [x for x in clean if x["label"] == "won" and x["avg_out"] <= x["avg_in"]]
 
-    print('-'*92)
-    print(f"  legs assessed: {len(legs)}  (won={sum(1 for x in legs if x['label']=='won')} "
-          f"lost={sum(1 for x in legs if x['label']=='lost')} "
-          f"live={sum(1 for x in legs if x['label']=='live')} unknown={n_unknown})")
-    print(f"\n  what SELLING booked (realized):           ${realized_total:+.2f}")
-    print(f"  what HOLDING-to-now would have booked:    ${hold_total:+.2f}")
+    print('-'*96)
+    print(f"  legs: {len(legs)} total  |  {len(clean)} clean (assessed)  |  "
+          f"{len(rolled)} traded-in-&-out ↺ (excluded)  |  {n_unknown} no-mark")
+    print(f"\n  CLEAN legs only — what SELLING booked (realized):  ${realized_total:+.2f}")
+    print(f"                    what HOLDING-to-now would book:   ${hold_total:+.2f}")
     print(f"  {'-'*52}")
-    print(f"  EXIT EDGE (selling - holding):            ${edge_total:+.2f}")
-    print(f"     ├─ money the exits SAVED  ({n_good} legs that fell after we sold): ${saved:+.2f}")
-    print(f"     └─ money LEFT ON TABLE   ({n_premature} legs that rose after we sold): ${left_on_table:+.2f}")
+    print(f"  EXIT EDGE (selling - holding):                     ${edge_total:+.2f}")
+    print(f"     ├─ saved   ({n_good} legs that fell after we sold):  ${saved:+.2f}")
+    print(f"     └─ left on table ({n_premature} legs that rose after we sold): ${left_on_table:+.2f}")
     if cut_loss_that_won:
         worst = sum(x["edge"] for x in cut_loss_that_won)
-        print(f"\n  ⚠ {len(cut_loss_that_won)} leg(s) were CUT AT A LOSS but went on to WIN "
-              f"(panic-sold winners): ${worst:+.2f}")
+        print(f"\n  ⚠ {len(cut_loss_that_won)} CLEAN leg(s) cut at a LOSS that went on to WIN: ${worst:+.2f}")
         for x in sorted(cut_loss_that_won, key=lambda y: y["edge"])[:5]:
-            print(f"      {_fmt_title(x['title'], x['outcome'], 52)}  "
+            print(f"      {_fmt_title(x['title'], x['outcome'], 50)}  "
                   f"sold {x['avg_out']:.2f} → now {x['mark']:.2f}  edge ${x['edge']:+.2f}")
-    if n_zero or n_unknown:
-        print(f"\n  note: {n_zero} leg(s) marked exactly 0 (treated as resolved-to-0); "
-              f"{n_unknown} had no mark (excluded from edge).")
+    if rolled:
+        print(f"\n  ↺ {len(rolled)} leg(s) EXCLUDED — sold more than ever held (traded in/out); "
+              "their 'edge' is not a real hold-vs-sell choice:")
+        for x in sorted(rolled, key=lambda y: y["edge"])[:6]:
+            print(f"      {_fmt_title(x['title'], x['outcome'], 44)}  "
+                  f"sold {x['shares']:.0f} sh but peak held only {x['peak']:.0f} "
+                  f"({x['trips']} sells)")
 
-    # ── verdict ──────────────────────────────────────────────────────────────
-    print(f"\n{'='*92}")
-    if abs(edge_total) < 0.15 * max(abs(realized_total), 1.0):
-        verdict = ("WASH — the exits roughly matched holding. The profit is the POSITIONS, "
-                   "not the timing.")
+    # ── verdict (on CLEAN legs only — round-tripped ones are not a hold choice) ─
+    print(f"\n{'='*96}")
+    if not clean:
+        verdict = "NO CLEAN LEGS — everything was traded in/out; can't judge hold-vs-sell."
+    elif abs(edge_total) < 0.15 * max(abs(realized_total), 1.0):
+        verdict = ("WASH — on legs actually held once, selling ≈ holding. The profit is the "
+                   "POSITIONS, not the exit timing.")
     elif edge_total < 0:
-        verdict = (f"SOLD TOO EARLY — holding would have made ${-edge_total:.2f} MORE. "
-                   "The positions worked out on their own; the exits left money on the table.")
+        verdict = (f"SOLD TOO EARLY — on cleanly-held legs, holding would have made "
+                   f"${-edge_total:.2f} MORE. The positions worked out; the exits clipped them.")
     else:
-        verdict = (f"THE SCALP WORKED — selling beat holding by ${edge_total:.2f}. "
-                   "The exits got out before reversals; the timing added value.")
+        verdict = (f"THE SCALP WORKED — selling beat holding by ${edge_total:.2f} on cleanly-held "
+                   "legs. The exit timing added value.")
     print(f"VERDICT: {verdict}")
-    print('='*92)
-    print("\nmark_now = best_mark (live midpoint, or the resolution last-trade ~0.999/~0.001\n"
-          "for settled markets). 'live' legs are provisional — their mark can still move.")
+    print('='*96)
+    print("\n↺ = sold more shares than ever held at once (traded in/out) → excluded: you can't\n"
+          "'hold to resolution' shares you already cycled through. mark_now = best_mark (live\n"
+          "midpoint, or resolution last-trade ~0.999/~0.001 for settled markets).")
 
 
 if __name__ == "__main__":

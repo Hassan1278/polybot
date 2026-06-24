@@ -117,6 +117,31 @@ def test_distinct_tokens_are_independent():
     assert round(book["B"]["sold_realized"], 6) == -20.0
 
 
+def test_peak_shares_tracks_max_held_not_cumulative_volume():
+    # Buy 50, sell 50, buy 50, sell 50: cumulative sold = 100 but you NEVER held
+    # more than 50 at once. peak_shares must read 50 (the round-trip tell).
+    book = realized_from_activity([
+        _ev("TRADE", "BUY", 50, 5.0, ts=1),
+        _ev("TRADE", "SELL", 50, 6.0, ts=2),
+        _ev("TRADE", "BUY", 50, 5.0, ts=3),
+        _ev("TRADE", "SELL", 50, 6.0, ts=4),
+    ])
+    s = book["T1"]
+    assert s["sold_shares"] == 100.0       # cumulative volume
+    assert s["peak_shares"] == 50.0        # most ever held at once
+    assert s["n_sells"] == 2
+
+
+def test_peak_shares_single_position_equals_sold():
+    book = realized_from_activity([
+        _ev("TRADE", "BUY", 100, 40.0, ts=1),
+        _ev("TRADE", "SELL", 100, 60.0, ts=2),
+    ])
+    s = book["T1"]
+    assert s["peak_shares"] == 100.0
+    assert s["sold_shares"] == 100.0
+
+
 def test_oversell_guard_never_goes_negative_shares():
     # A stray SELL bigger than what's held (feed gap) caps at held, no crash.
     book = realized_from_activity([

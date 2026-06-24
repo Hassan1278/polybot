@@ -91,6 +91,7 @@ def realized_from_activity(events: list[dict]) -> dict[str, dict]:
             s = st[asset] = {
                 "title": title, "outcome": outcome,
                 "shares": 0.0, "cost": 0.0,           # running open lot (avg cost)
+                "peak_shares": 0.0,                   # most ever held at once
                 "sold_shares": 0.0, "sold_proceeds": 0.0, "sold_cost": 0.0,
                 "redeemed_shares": 0.0, "redeemed_proceeds": 0.0, "redeemed_cost": 0.0,
                 "n_buys": 0, "n_sells": 0, "n_redeems": 0,
@@ -108,6 +109,7 @@ def realized_from_activity(events: list[dict]) -> dict[str, dict]:
         if typ == "TRADE" and side == "BUY":
             s["shares"] += shares
             s["cost"] += usdc
+            s["peak_shares"] = max(s["peak_shares"], s["shares"])
             s["n_buys"] += 1
         elif typ == "TRADE" and side == "SELL":
             avg = (s["cost"] / s["shares"]) if s["shares"] > 1e-9 else 0.0
