@@ -13,6 +13,7 @@ from services.executor.equity_guard import (
     breaker_action,
     drawdown_breached,
     drawdown_recovered,
+    equity_floor_breached,
 )
 
 
@@ -43,6 +44,23 @@ def test_nonpositive_baseline_is_safe():
 
 def test_total_wipe_breaches():
     assert drawdown_breached(200.0, 0.01, 0.15) is True
+
+
+# ── equity_floor_breached (absolute hard stop) ───────────────────────────────
+
+def test_floor_breaches_below():
+    assert equity_floor_breached(150.0, 180.0) is True
+
+
+def test_floor_holds_at_or_above():
+    assert equity_floor_breached(180.0, 180.0) is False     # strictly below only
+    assert equity_floor_breached(200.0, 180.0) is False
+
+
+def test_floor_disabled_never_breaches():
+    # No floor configured (None/0) -> the absolute stop is opt-in, never trips.
+    assert equity_floor_breached(1.0, None) is False
+    assert equity_floor_breached(1.0, 0.0) is False
 
 
 def test_trading_day_is_iso_date():

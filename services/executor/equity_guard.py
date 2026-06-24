@@ -10,7 +10,9 @@ This loop closes it. Every minute, when live mode is enabled, it reads the
 wallet's REAL equity — pUSD cash + marked value of open positions, the same
 sources as the ``/live/account`` dashboard card — snapshots day-start equity in
 Redis, and trips the kill switch when intraday drawdown exceeds
-``drawdown.max_daily_drawdown_pct``.
+``drawdown.max_daily_drawdown_pct``. It also trips on an absolute equity floor
+(``drawdown.min_equity_usdc``) — a hard stop, manual-clear, independent of the
+daily % breaker, so it still protects when that % breaker is disabled.
 
 Fail-SAFE by construction:
   - Runs only when "live" is in the enabled mode set (no real money, no guard).
@@ -54,6 +56,14 @@ def drawdown_breached(baseline: float, equity: float, pct: float) -> bool:
     if baseline <= 0:
         return False
     return (baseline - equity) / baseline >= pct
+
+
+def equity_floor_breached(equity: float, floor: float | None) -> bool:
+    """True if equity has fallen below an absolute USDC floor. No floor
+    (None/<=0) never breaches — the absolute hard stop is opt-in."""
+    if not floor or floor <= 0:
+        return False
+    return equity < floor
 
 
 def drawdown_recovered(baseline: float, equity: float, resume_pct: float | None) -> bool:
@@ -157,11 +167,11 @@ async def _tick() -> None:
     if "live" not in await enabled_modes():
         return
     dd_cfg = (await merged_risk("live")).get("drawdown", {})
+    floor = _f(dd_cfg.get("min_equity_usdc"))
     raw_pct = dd_cfg.get("max_daily_drawdown_pct")
-    if not raw_pct or float(raw_pct) <= 0:
-        return                                       # breaker disabled
-    pct = float(raw_pct)
-    reset_hour = int(dd_cfg.get("daily_reset_utc_hour", 0))
+    pct = float(raw_pct) if raw_pct else 0.0
+    if floor <= 0 and pct <= 0:
+        return                                       # both guards disabled — nothing to do
 
     address = await _deposit_wallet()
     if not address:
@@ -171,6 +181,29 @@ async def _tick() -> None:
     if equity is None or equity <= 0:
         return                                       # fail-safe: never act on a bad read
 
+    # Absolute equity floor: a HARD stop independent of the daily % breaker, and
+    # manual-clear (if real money has fallen to the floor, a human re-enables).
+    # Checked first so it still protects when the % breaker is disabled.
+    if equity_floor_breached(equity, floor):
+        if await kill_status():
+            return                                   # already halted — don't spam
+        reason = f"equity_floor:now={equity:.2f}<min={floor:.2f}"
+        log.error("equity_guard_floor_breach", reason=reason)
+        await kill_set(reason, actor="equity_guard")
+        try:
+            await alerts.notify(
+                "critical",
+                "Equity floor breaker tripped — trading halted",
+                f"Real equity ${equity:.2f} fell below the ${floor:.2f} floor; "
+                f"kill switch is ON. Review and clear it manually to resume.",
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("equity_guard_floor_alert_failed")
+        return
+
+    if pct <= 0:
+        return                                       # % daily-drawdown breaker disabled
+    reset_hour = int(dd_cfg.get("daily_reset_utc_hour", 0))
     r = redis_client()
     key = _BASELINE_KEY.format(day=_trading_day(reset_hour))
     baseline_raw = await r.get(key)

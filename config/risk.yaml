@@ -127,12 +127,17 @@ defaults:
     # minute, snapshots day-start equity, and trips the kill switch when intraday
     # drawdown exceeds this fraction. Reuses the /live/account data sources.
     # Fail-safe: never trips on a failed read. 0/null off.
-    max_daily_drawdown_pct: 0.15
-    # Auto-resume the breaker's OWN halt once intraday drawdown recovers to <=
-    # this fraction of the day's open. MUST be < max_daily_drawdown_pct (the gap
-    # is hysteresis that prevents flapping around the trip line). null/0 = no
-    # auto-resume (manual-clear only). Only equity_guard's own kills auto-clear.
+    # DISABLED per operator: the daily % breaker is OFF (was 0.15) so the algo is
+    # NOT halted by an intraday swing. The absolute floor below is the only stop.
+    max_daily_drawdown_pct: 0
+    # Auto-resume the breaker's OWN (% drawdown) halt once intraday drawdown
+    # recovers to <= this fraction of the day's open. Moot while the % breaker is
+    # disabled; only equity_guard's own equity_drawdown kills ever auto-clear.
     resume_drawdown_pct: 0.10
+    # Absolute equity floor (USDC): a HARD stop, manual-clear, independent of the
+    # % breaker above. Trips the kill switch when TRUE venue equity (cash + marked
+    # positions) falls below this. 0/null off. Operator-set to a $180 floor.
+    min_equity_usdc: 180
 
   execution:
     cooldown_seconds_per_market: 300
