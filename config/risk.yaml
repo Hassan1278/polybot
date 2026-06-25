@@ -209,8 +209,16 @@ modes:
       max_position_usdc: 25                   # same as default; ceiling stays small
       max_open_positions: 30                  # well below paper's 200
       max_per_category_usdc: 250              # max ~$5k exposure per category
-      max_crypto_factor_usdc: 60              # ALL crypto = one directional bet;
-                                              # ~survivable fraction of a small acct
+      max_crypto_factor_usdc: 25              # ALL crypto = one directional bet.
+                                              # CUT 60 -> 25 (operator) during a
+                                              # crypto down-move: the book was
+                                              # concentrated long "BTC/ETH above
+                                              # $X" and bled as crypto fell. ~11%
+                                              # of ~$226 equity. Caps NEW same-
+                                              # direction crypto notional (no
+                                              # forced selling); blocks stacking
+                                              # more into the bet until exposure
+                                              # unwinds. Non-crypto unaffected.
     drawdown:
       max_daily_loss_usdc: 100                # kill at -1% of $10k equity
     execution:
