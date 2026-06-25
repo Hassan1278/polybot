@@ -2,14 +2,21 @@
 
 Win-rate ≠ profitability. A category can win most of its bets and still lose money
 (many small wins, rare big losses — the favorite-fade fat tail). This reports BOTH,
-per category, from venue truth (the data-api activity feed + open positions), so you
-can see which categories are actually worth trading.
+per category, from venue truth (the data-api activity feed).
 
-A "settled bet" = a token the bot took live and that has resolved or been closed:
-  WIN  = net realized (sells + redemptions) > 0, or redeemed for a payout
-  LOSS = net realized < 0, or held to a worthless resolution (mark→0)
-Genuinely-open positions (still trading) are EXCLUDED from win-rate (not yet decided).
-Category comes from the local Market table, joined by token id (yes/no_token_id).
+Accounting is done per MARKET (conditionId), via CASH FLOW:
+    net = sells + redemptions − buys      (summed over all of a market's tokens)
+This is robust to a Polymarket quirk that breaks naive per-token accounting: a
+REDEEM (held-to-resolution win) is logged under a DIFFERENT token id than the
+original buy, so token-keyed accounting dumps every redeemed winner into an
+"unknown" bucket and makes real categories look like pure losers. Grouping by
+conditionId (== Market.market_id) puts winners back in their category with cost
+subtracted.
+
+A market counts toward win-rate once it's SETTLED (no live position left):
+  WIN  = realized cash net > 0;  LOSS = net < 0.
+Markets with an open position are excluded (not yet decided). Category comes from
+the local Market table keyed by conditionId.
 
 Usage (on the VPS):
   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec executor \
@@ -25,26 +32,46 @@ from polybot.db import session_scope
 from polybot.models import Market
 from sqlalchemy import select
 
-from scripts.live_pnl import (
-    _f,
-    _fetch_activity,
-    _fetch_positions,
-    _norm,
-    realized_from_activity,
-)
+from scripts.live_pnl import _f, _fetch_activity, _fetch_positions
 from services.executor.equity_guard import _deposit_wallet
 
-_EPS = 0.01            # ignore sub-cent realized noise (cancels, dust)
-_RESOLVED_MARK = 0.02  # held leg at/under this implied price + ~no value = decided
+_EPS = 0.01            # ignore sub-cent net noise
 
 
 def bet_outcome(net: float, eps: float = _EPS) -> str:
-    """WIN / LOSS / FLAT from a settled bet's net realized P&L. Pure / tested."""
+    """WIN / LOSS / FLAT from a settled market's net realized P&L. Pure / tested."""
     if net > eps:
         return "win"
     if net < -eps:
         return "loss"
     return "flat"
+
+
+def settled_market_nets(activity: list[dict], open_conds: set[str]) -> dict[str, float]:
+    """Per-market (conditionId) realized cash net = sells + redeems − buys, for
+    markets with NO live position left (settled). Robust to the redeem-token-id
+    mismatch because it groups by conditionId, not token. Pure / tested."""
+    flows: dict[str, dict] = {}
+    for e in activity:
+        cond = str(e.get("conditionId") or e.get("market") or "")
+        if not cond:
+            continue
+        typ = str(e.get("type") or "").upper()
+        side = str(e.get("side") or "").upper()
+        usdc = _f(e.get("usdcSize"))
+        if usdc <= 0:
+            usdc = _f(e.get("size")) * _f(e.get("price"))
+        if usdc <= 0:
+            continue
+        f = flows.setdefault(cond, {"buys": 0.0, "sells": 0.0, "redeems": 0.0})
+        if typ == "TRADE" and side == "BUY":
+            f["buys"] += usdc
+        elif typ == "TRADE" and side == "SELL":
+            f["sells"] += usdc
+        elif typ == "REDEEM":
+            f["redeems"] += usdc
+    return {cond: f["sells"] + f["redeems"] - f["buys"]
+            for cond, f in flows.items() if cond not in open_conds}
 
 
 def aggregate_by_category(items: list[tuple[str, str, float]]) -> dict[str, dict]:
@@ -63,19 +90,11 @@ def aggregate_by_category(items: list[tuple[str, str, float]]) -> dict[str, dict
     return out
 
 
-async def _token_category_map() -> dict[str, str | None]:
-    """token_id -> category, from the local Market table (both YES and NO tokens)."""
+async def _cond_category_map() -> dict[str, str | None]:
+    """conditionId (== Market.market_id) -> category, from the local Market table."""
     async with session_scope() as s:
-        rows = (await s.execute(
-            select(Market.yes_token_id, Market.no_token_id, Market.category)
-        )).all()
-    m: dict[str, str | None] = {}
-    for yt, nt, cat in rows:
-        if yt:
-            m[str(yt)] = cat
-        if nt:
-            m[str(nt)] = cat
-    return m
+        rows = (await s.execute(select(Market.market_id, Market.category))).all()
+    return {str(mid): cat for mid, cat in rows if mid}
 
 
 async def main() -> None:
@@ -91,54 +110,24 @@ async def main() -> None:
     finally:
         await client.close()
 
-    events = [_norm(e) for e in raw_activity]
-    book = realized_from_activity(events)
-    tok2cat = await _token_category_map()
+    open_conds = {str(p.get("conditionId") or "") for p in raw_positions
+                  if _f(p.get("size")) > 0 and p.get("conditionId")}
+    nets = settled_market_nets(raw_activity, open_conds)
+    cond2cat = await _cond_category_map()
 
-    items: list[tuple[str, str, float]] = []
-    seen: set[str] = set()
-    unknown_cat = 0
-
-    # Settled-by-trade: any token with realized sells/redemptions.
-    for token, s in book.items():
-        if s["sold_shares"] <= 1e-6 and s["redeemed_shares"] <= 1e-6:
-            continue
-        net = s["sold_realized"] + s["redeemed_realized"]
-        cat = tok2cat.get(token)
-        if cat is None:
-            unknown_cat += 1
-        items.append((cat or "unknown", bet_outcome(net), net))
-        seen.add(token)
-
-    # Resolved-against-us held legs (never sold — expired worthless) = losses.
-    open_excluded = 0
-    for p in raw_positions:
-        if _f(p.get("size")) <= 0:
-            continue
-        asset = str(p.get("asset") or "")
-        if asset in seen:
-            continue
-        mark, val, upnl = _f(p.get("curPrice")), _f(p.get("currentValue")), _f(p.get("cashPnl"))
-        decided = bool(p.get("redeemable")) or (mark <= _RESOLVED_MARK and val <= 0.01)
-        if decided and upnl < 0:
-            cat = tok2cat.get(asset)
-            if cat is None:
-                unknown_cat += 1
-            items.append((cat or "unknown", "loss", upnl))
-            seen.add(asset)
-        else:
-            open_excluded += 1
-
+    unknown_cat = sum(1 for cond in nets if cond not in cond2cat)
+    items = [(cond2cat.get(cond) or "unknown", bet_outcome(net), net)
+             for cond, net in nets.items()]
     agg = aggregate_by_category(items)
     if not agg:
-        print("No settled live bets found in the activity window.")
+        print("No settled live markets found in the activity window.")
         return
 
     rows = sorted(agg.items(), key=lambda kv: kv[1]["net"])   # worst net first
     print(f"\n{'='*82}")
-    print(f"PER-CATEGORY WIN-RATE & NET P&L  (settled live bets)   wallet={wallet[:10]}…")
+    print(f"PER-CATEGORY WIN-RATE & NET P&L  (settled markets, cashflow)   wallet={wallet[:10]}…")
     print('='*82)
-    print(f"{'category':<16}{'bets':>6}{'win':>6}{'loss':>6}{'win-rate':>10}{'net $':>12}  verdict")
+    print(f"{'category':<16}{'mkts':>6}{'win':>6}{'loss':>6}{'win-rate':>10}{'net $':>12}  verdict")
     print('-'*82)
     tot_w = tot_l = 0
     tot_net = 0.0
@@ -147,8 +136,9 @@ async def main() -> None:
         wr_s = f"{wr*100:.0f}%" if wr is not None else "n/a"
         prof = c["net"] > 0
         pos_wr = wr is not None and wr > 0.5
-        verdict = ("PROFITABLE" if prof else "loses $") + ("" if pos_wr == prof else
-                   "  ⚠ +WR but unprofitable" if pos_wr and not prof else "")
+        verdict = "PROFITABLE" if prof else "loses $"
+        if pos_wr and not prof:
+            verdict += "  ⚠ +WR but unprofitable"
         print(f"{cat[:15]:<16}{c['n']:>6}{c['win']:>6}{c['loss']:>6}{wr_s:>10}"
               f"{c['net']:>+12.2f}  {verdict}")
         tot_w += c["win"]
@@ -158,7 +148,6 @@ async def main() -> None:
     tot_wr = (tot_w / (tot_w + tot_l)) if (tot_w + tot_l) else 0.0
     print(f"{'ALL':<16}{tot_w+tot_l:>6}{tot_w:>6}{tot_l:>6}{tot_wr*100:>9.0f}%{tot_net:>+12.2f}")
 
-    # ── direct answers ────────────────────────────────────────────────────────
     profitable = [c for c, v in rows if v["net"] > 0]
     pos_wr = [c for c, v in rows if v["winrate"] is not None and v["winrate"] > 0.5]
     pos_wr_but_loss = [c for c, v in rows
@@ -167,19 +156,20 @@ async def main() -> None:
     print(f"Positive win-rate (>50%): {', '.join(pos_wr) if pos_wr else 'none'}")
     print(f"Actually PROFITABLE (net>$0): {', '.join(profitable) if profitable else 'NONE'}")
     if pos_wr_but_loss:
-        print(f"⚠ Win most bets but LOSE money (fat tail): {', '.join(pos_wr_but_loss)}")
+        print(f"⚠ Win most markets but LOSE money (fat tail): {', '.join(pos_wr_but_loss)}")
     print('='*82)
     notes = []
-    if open_excluded:
-        notes.append(f"{open_excluded} still-open position(s) excluded (not yet decided)")
+    if open_conds:
+        notes.append(f"{len(open_conds)} market(s) still open, excluded (not yet decided)")
     if unknown_cat:
-        notes.append(f"{unknown_cat} bet(s) had no category in the local Market table")
+        notes.append(f"{unknown_cat} settled market(s) not in the local Market table (→ unknown)")
     if hit_cap:
-        notes.append("hit the activity scan cap — older bets may be missing")
+        notes.append("hit the activity scan cap — older markets may be missing")
     if notes:
         print("\nnote: " + "; ".join(notes) + ".")
-    print("Win-rate counts settled bets; profitability is net realized $ (venue truth).\n"
-          "A high win-rate with negative net = many small wins, rare big losses.")
+    print("Net is realized cashflow per market (sells+redeems−buys), so redeemed\n"
+          "winners count in their real category. High win-rate + negative net =\n"
+          "many small wins, rare big losses.")
 
 
 if __name__ == "__main__":

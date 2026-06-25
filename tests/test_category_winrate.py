@@ -3,7 +3,49 @@ scripts/category_winrate.py (the DB join + fetch are thin I/O run on the VPS).""
 
 from __future__ import annotations
 
-from scripts.category_winrate import aggregate_by_category, bet_outcome
+from scripts.category_winrate import (
+    aggregate_by_category,
+    bet_outcome,
+    settled_market_nets,
+)
+
+
+def _ev(cond, typ, side, usdc):
+    return {"conditionId": cond, "type": typ, "side": side, "usdcSize": usdc,
+            "size": 0, "price": 0}
+
+
+def test_settled_net_simple_roundtrip():
+    nets = settled_market_nets([
+        _ev("A", "TRADE", "BUY", 60.0),
+        _ev("A", "TRADE", "SELL", 65.0),
+    ], open_conds=set())
+    assert round(nets["A"], 2) == 5.0
+
+
+def test_settled_net_redeemed_winner_nets_cost_correctly():
+    # The key fix: a held-to-resolution win logs BUY + REDEEM under the SAME
+    # conditionId (even though token ids differ), so cashflow nets the cost.
+    nets = settled_market_nets([
+        _ev("A", "TRADE", "BUY", 45.0),
+        _ev("A", "REDEEM", "", 100.0),
+    ], open_conds=set())
+    assert round(nets["A"], 2) == 55.0          # not +100, not "unknown"
+
+
+def test_settled_net_expired_worthless_is_full_loss():
+    # Bought, never sold/redeemed, not open -> lost the cost.
+    nets = settled_market_nets([_ev("A", "TRADE", "BUY", 30.0)], open_conds=set())
+    assert round(nets["A"], 2) == -30.0
+
+
+def test_settled_net_excludes_open_markets():
+    nets = settled_market_nets([
+        _ev("A", "TRADE", "BUY", 60.0),
+        _ev("A", "TRADE", "SELL", 65.0),
+        _ev("B", "TRADE", "BUY", 10.0),
+    ], open_conds={"B"})
+    assert "A" in nets and "B" not in nets        # B still open -> excluded
 
 
 def test_bet_outcome_thresholds():
