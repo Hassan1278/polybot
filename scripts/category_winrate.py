@@ -47,10 +47,9 @@ def bet_outcome(net: float, eps: float = _EPS) -> str:
     return "flat"
 
 
-def settled_market_nets(activity: list[dict], open_conds: set[str]) -> dict[str, float]:
-    """Per-market (conditionId) realized cash net = sells + redeems − buys, for
-    markets with NO live position left (settled). Robust to the redeem-token-id
-    mismatch because it groups by conditionId, not token. Pure / tested."""
+def market_cashflows(activity: list[dict]) -> dict[str, dict]:
+    """Per-market (conditionId) cash flows {buys, sells, redeems}. Grouping by
+    conditionId is robust to the redeem-token-id mismatch. Pure / tested."""
     flows: dict[str, dict] = {}
     for e in activity:
         cond = str(e.get("conditionId") or e.get("market") or "")
@@ -70,8 +69,22 @@ def settled_market_nets(activity: list[dict], open_conds: set[str]) -> dict[str,
             f["sells"] += usdc
         elif typ == "REDEEM":
             f["redeems"] += usdc
-    return {cond: f["sells"] + f["redeems"] - f["buys"]
-            for cond, f in flows.items() if cond not in open_conds}
+    return flows
+
+
+def settled_nets(flows: dict[str, dict], cond_value: dict[str, float],
+                 live_conds: set[str]) -> dict[str, float]:
+    """Net per SETTLED market = sells + redeems + current_value − buys, excluding
+    only markets still genuinely TRADING (``live_conds``). A resolved-worthless
+    leg (still size>0 but decided) is settled-and-lost: value≈0 → net = −buys.
+    A resolved-won-not-yet-redeemed leg carries its value → net positive. Pure."""
+    out: dict[str, float] = {}
+    for cond in set(flows) | set(cond_value):
+        if cond in live_conds:
+            continue
+        f = flows.get(cond, {"buys": 0.0, "sells": 0.0, "redeems": 0.0})
+        out[cond] = f["sells"] + f["redeems"] + cond_value.get(cond, 0.0) - f["buys"]
+    return out
 
 
 def aggregate_by_category(items: list[tuple[str, str, float]]) -> dict[str, dict]:
@@ -110,9 +123,22 @@ async def main() -> None:
     finally:
         await client.close()
 
-    open_conds = {str(p.get("conditionId") or "") for p in raw_positions
-                  if _f(p.get("size")) > 0 and p.get("conditionId")}
-    nets = settled_market_nets(raw_activity, open_conds)
+    # Per-market current value, and the set of markets still genuinely TRADING
+    # (exclude only those — a resolved-worthless/won leg is settled even though
+    # its worthless shares still sit in /positions with size>0).
+    cond_value: dict[str, float] = {}
+    live_conds: set[str] = set()
+    for p in raw_positions:
+        if _f(p.get("size")) <= 0 or not p.get("conditionId"):
+            continue
+        cond = str(p["conditionId"])
+        mark, val = _f(p.get("curPrice")), _f(p.get("currentValue"))
+        cond_value[cond] = cond_value.get(cond, 0.0) + val
+        decided = bool(p.get("redeemable")) or (mark <= 0.02 and val <= 0.01)
+        if not decided:
+            live_conds.add(cond)
+
+    nets = settled_nets(market_cashflows(raw_activity), cond_value, live_conds)
     cond2cat = await _cond_category_map()
 
     unknown_cat = sum(1 for cond in nets if cond not in cond2cat)
@@ -159,8 +185,8 @@ async def main() -> None:
         print(f"⚠ Win most markets but LOSE money (fat tail): {', '.join(pos_wr_but_loss)}")
     print('='*82)
     notes = []
-    if open_conds:
-        notes.append(f"{len(open_conds)} market(s) still open, excluded (not yet decided)")
+    if live_conds:
+        notes.append(f"{len(live_conds)} market(s) still trading, excluded (not yet decided)")
     if unknown_cat:
         notes.append(f"{unknown_cat} settled market(s) not in the local Market table (→ unknown)")
     if hit_cap:

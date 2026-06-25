@@ -6,7 +6,8 @@ from __future__ import annotations
 from scripts.category_winrate import (
     aggregate_by_category,
     bet_outcome,
-    settled_market_nets,
+    market_cashflows,
+    settled_nets,
 )
 
 
@@ -16,36 +17,49 @@ def _ev(cond, typ, side, usdc):
 
 
 def test_settled_net_simple_roundtrip():
-    nets = settled_market_nets([
+    flows = market_cashflows([
         _ev("A", "TRADE", "BUY", 60.0),
         _ev("A", "TRADE", "SELL", 65.0),
-    ], open_conds=set())
+    ])
+    nets = settled_nets(flows, cond_value={}, live_conds=set())
     assert round(nets["A"], 2) == 5.0
 
 
 def test_settled_net_redeemed_winner_nets_cost_correctly():
-    # The key fix: a held-to-resolution win logs BUY + REDEEM under the SAME
-    # conditionId (even though token ids differ), so cashflow nets the cost.
-    nets = settled_market_nets([
+    # A held-to-resolution win logs BUY + REDEEM under the SAME conditionId
+    # (even though token ids differ), so cashflow nets the cost.
+    flows = market_cashflows([
         _ev("A", "TRADE", "BUY", 45.0),
         _ev("A", "REDEEM", "", 100.0),
-    ], open_conds=set())
+    ])
+    nets = settled_nets(flows, cond_value={}, live_conds=set())
     assert round(nets["A"], 2) == 55.0          # not +100, not "unknown"
 
 
 def test_settled_net_expired_worthless_is_full_loss():
-    # Bought, never sold/redeemed, not open -> lost the cost.
-    nets = settled_market_nets([_ev("A", "TRADE", "BUY", 30.0)], open_conds=set())
+    # Bought, never sold/redeemed, value gone -> lost the cost (NOT excluded just
+    # because worthless shares still linger in /positions).
+    flows = market_cashflows([_ev("A", "TRADE", "BUY", 30.0)])
+    nets = settled_nets(flows, cond_value={"A": 0.0}, live_conds=set())
     assert round(nets["A"], 2) == -30.0
 
 
-def test_settled_net_excludes_open_markets():
-    nets = settled_market_nets([
+def test_settled_net_resolved_won_not_yet_redeemed_uses_value():
+    # Won but not yet redeemed: no redeem cash, but the position value (~$1/share)
+    # carries the win. buys 40, current value 100 -> +60.
+    flows = market_cashflows([_ev("A", "TRADE", "BUY", 40.0)])
+    nets = settled_nets(flows, cond_value={"A": 100.0}, live_conds=set())
+    assert round(nets["A"], 2) == 60.0
+
+
+def test_settled_net_excludes_only_live_trading_markets():
+    flows = market_cashflows([
         _ev("A", "TRADE", "BUY", 60.0),
         _ev("A", "TRADE", "SELL", 65.0),
         _ev("B", "TRADE", "BUY", 10.0),
-    ], open_conds={"B"})
-    assert "A" in nets and "B" not in nets        # B still open -> excluded
+    ])
+    nets = settled_nets(flows, cond_value={"B": 6.0}, live_conds={"B"})
+    assert "A" in nets and "B" not in nets        # B still trading -> excluded
 
 
 def test_bet_outcome_thresholds():
