@@ -5,8 +5,6 @@ from __future__ import annotations
 import math
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import and_, func, select
-
 from polybot.asset_direction import (
     CRYPTO_MAJORS,
     asset_of,
@@ -16,14 +14,15 @@ from polybot.asset_direction import (
     same_bracket,
     win_region,
 )
-from polybot.politics_candidate import candidate_of
 from polybot.clients import ClobClient
 from polybot.db import session_scope
 from polybot.logging import get_logger
 from polybot.models import Fill, Market, Position
+from polybot.politics_candidate import candidate_of
 from polybot.redis_bus import client as redis_client  # noqa: F401  (re-exported for callers)
 from polybot.redis_bus import kill_status
 from polybot.runtime_config import current_mode, merged_risk
+from sqlalchemy import func, select
 
 log = get_logger(__name__)
 
@@ -630,6 +629,22 @@ async def compute_net_shares_held(s, *, mode: str, market_id: str, outcome: str)
         return 0.0
 
 
+def category_blocked(category: str | None, pos_cfg: dict) -> bool:
+    """True if ``category`` is on this mode's disabled_categories list (entry block).
+    Pure / unit-tested. Case-insensitive; empty/missing list never blocks."""
+    disabled = {str(c).lower() for c in (pos_cfg.get("disabled_categories") or [])}
+    return bool(category) and str(category).lower() in disabled
+
+
+def entry_below_floor(price: float, pos_cfg: dict) -> float | None:
+    """The configured min_entry_price if ``price`` is a positive value below it,
+    else None (so a 0/None price or a disabled floor never blocks). Pure / tested."""
+    min_px = pos_cfg.get("min_entry_price")
+    if min_px is not None and 0.0 < price < float(min_px):
+        return float(min_px)
+    return None
+
+
 async def preflight(*, mode: str, market_id: str, category: str | None,
                     side: str, size_usdc: float, score: float,
                     outcome: str | None = None, price: float = 0.0,
@@ -733,6 +748,21 @@ async def preflight(*, mode: str, market_id: str, category: str | None,
             raise RiskRejection(f"rate_limit_exit:{recent}>={rate_cap}")
         return {"ok": True, "max_size": float(pos_cfg.get("max_position_usdc", 25.0)),
                 "is_exit": True}
+
+    # 1b) DISABLED CATEGORIES — operator kill-switch for a whole category on this
+    #     mode (e.g. crypto OFF on live). Blocks only NEW entries; existing
+    #     positions are untouched and can still be sold/stopped out (the close
+    #     path doesn't run preflight). Case-insensitive. Empty list disables.
+    if category_blocked(category, pos_cfg):
+        raise RiskRejection(f"category_disabled:{category}")
+
+    # 1c) ENTRY PRICE FLOOR — refuse new entries priced below min_entry_price.
+    #     Sub-floor longshots have brutal payoff geometry (you risk ~all of it for
+    #     a small move) and dominate the fat-tail losses. price is the entry
+    #     probability (0-1). 0/null disables.
+    floor = entry_below_floor(price, pos_cfg)
+    if floor is not None:
+        raise RiskRejection(f"entry_price_below_floor:{price:.3f}<{floor:.3f}")
 
     # 2) per-order size
     max_pos = float(pos_cfg.get("max_position_usdc", 25.0))

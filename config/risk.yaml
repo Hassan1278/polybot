@@ -56,6 +56,10 @@ defaults:
     # applies. Price is the entry probability (0-1), e.g. 0.20 = 20c.
     low_odds_price_threshold: 0.20
     low_odds_max_per_bet_usdc: 5
+    # Hard entry-price FLOOR: refuse any NEW entry priced below this (operator).
+    # Sub-floor longshots have brutal payoff geometry and dominate the fat-tail
+    # losses. Price is the entry probability (0-1), so 0.07 = 7c. 0/null disables.
+    min_entry_price: 0.07
     max_per_category_usdc: 400
     # Treat all correlated crypto MAJORS as ONE bet per direction and cap the
     # GROSS same-direction notional across every crypto market. The per-market /
@@ -158,7 +162,8 @@ defaults:
   # in paper by default; LIVE selling stays OFF (live_enabled) until validated.
   exit_mirror:
     enabled: true                  # run detection (paper closes shadow-run)
-    live_enabled: true             # LIVE exits ON — close live positions when the entry cluster dissolves
+    live_enabled: false            # LIVE cluster-exit OFF (operator): the ONLY live
+                                   # exit is now the stop-loss in exit_rules. No early exits.
     support_dissolution_threshold: 0.5         # exit when < this fraction of the cluster (quality-weighted) is still long
     fallback_support_dissolution_threshold: 0.35   # stricter when the cluster is only INFERRED (no entry Signal)
     live_exit_on_fallback: false   # never auto-sell live off an inferred cluster
@@ -168,25 +173,22 @@ defaults:
     allow_close_when_killed: true  # a close may bypass the kill switch (closing de-risks)
     quality_window: "30d"          # WalletStats window for cluster quality weights
 
-  # Price/PnL + asset-level sharp-sentiment exits (services/executor/exit_rules.py)
-  # for the short-dated crypto book, where exit_mirror's same-market cluster is empty.
-  # Evaluated on a fast sweep; every held leg logs `exit_rule_eval` (never silent).
+  # STOP-LOSS-ONLY exit engine (services/executor/exit_rules.py). Operator model:
+  # positions are NOT exited early (no take-profit / thesis / near-expiry /
+  # sentiment) — they ride to resolution unless a stop is hit. Applies to EVERY
+  # held live leg, every category. Every leg logs `exit_rule_eval` (never silent).
   exit_rules:
     enabled: true
-    price_live_enabled: true          # price/PnL exits close LIVE (deterministic, protective)
-    take_profit_pct: 0.50             # close a leg once it's up >= 50% on the mark
-    stop_loss_pct: 0.50               # close a leg once it's down >= 50%
-    thesis_invalidation_mark: 0.20    # close if our leg's implied win-prob falls to/below this
-    flatten_before_expiry_hours: 1.0  # flatten any leg within this many hours of resolution
+    live_enabled: true                # the stop-loss closes LIVE
+    stop_loss_level: 0.20             # close if the mark falls to/below 0.20...
+    low_entry_threshold: 0.20         # ...unless the leg was ENTERED below 0.20,
+    low_entry_stop: 0.05              #    in which case the stop is 0.05 (longshot room)
+    profit_lock_trigger: 0.75         # once the mark EVER exceeds 0.75 (any entry)...
+    profit_lock_stop: 0.43            # ...the stop ratchets up to exactly 0.43
+    hwm_ttl_seconds: 1209600          # 14d: how long the "ever hit 0.75" flag persists in Redis
     min_close_notional_usdc: 2.0      # ignore dust legs (closing them just bleeds fees)
-    sentiment_live_enabled: true      # live exits on a sharp-sentiment reversal (operator-enabled)
-    sentiment_against_threshold: 0.65 # exit when quality-weighted sharp sentiment is >= this against us
-    sentiment_min_sharps: 3           # min positioned sharps on the ASSET; matches entry's correlation min_wallets (3)
-    sentiment_lookback_hours: 6       # net RECENT sharp sentiment (short window ~ entry timescale, less lag)
-    sentiment_max_stats_age_hours: 36 # don't act on sentiment if wallet stats are staler than this
-    quality_window: "30d"             # WalletStats window for sharp quality weights
     cooldown_seconds: 300             # one close per (mode, market, outcome) per window
-    sweep_seconds: 60                 # price/sentiment re-check cadence (faster than exit_mirror)
+    sweep_seconds: 60                 # stop-loss re-check cadence
 
   live_only:
     require_kill_switch_check: true
@@ -209,6 +211,11 @@ modes:
       max_position_usdc: 25                   # same as default; ceiling stays small
       max_open_positions: 30                  # well below paper's 200
       max_per_category_usdc: 250              # max ~$5k exposure per category
+      # CRYPTO DISABLED ON LIVE (operator): block all NEW live crypto entries.
+      # Existing crypto positions are untouched and still get sold/stopped out
+      # (the close path skips preflight). Paper is unaffected. Remove "crypto"
+      # to re-enable. Case-insensitive.
+      disabled_categories: [crypto]
       max_crypto_factor_usdc: 25              # ALL crypto = one directional bet.
                                               # CUT 60 -> 25 (operator) during a
                                               # crypto down-move: the book was
@@ -230,4 +237,4 @@ modes:
       anchor: 0.65                            # only high-score signals get size
       steepness: 4.0
     exit_mirror:
-      live_enabled: true                      # LIVE exits ON (operator-enabled; bot-attributable positions only)
+      live_enabled: false                     # LIVE cluster-exit OFF (operator) — stop-loss is the only exit
