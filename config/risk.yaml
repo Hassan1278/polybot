@@ -173,13 +173,16 @@ defaults:
     allow_close_when_killed: true  # a close may bypass the kill switch (closing de-risks)
     quality_window: "30d"          # WalletStats window for cluster quality weights
 
-  # STOP-LOSS-ONLY exit engine (services/executor/exit_rules.py). Operator model:
-  # positions are NOT exited early (no take-profit / thesis / near-expiry /
-  # sentiment) — they ride to resolution unless a stop is hit. Applies to EVERY
-  # held live leg, every category. Every leg logs `exit_rule_eval` (never silent).
+  # Stop-loss exit engine (services/executor/exit_rules.py).
+  # DISABLED per operator: the stop-loss is OFF. Combined with exit_mirror live
+  # off, the live bot does NO selling at all — every position RIDES TO RESOLUTION
+  # (no stop-loss, no take-profit, no early exits of any kind). The only live exit
+  # is on-chain settlement. Downside is therefore UNCAPPED: losers ride to $0.
+  # The stop-loss ladder below is retained, dormant — flip enabled:true (and
+  # live_enabled:true) to restore it without a code change.
   exit_rules:
-    enabled: true
-    live_enabled: true                # the stop-loss closes LIVE
+    enabled: false                    # OFF — no stop-loss sweep; positions ride to resolution
+    live_enabled: false               # (moot while disabled) the stop-loss would close LIVE
     stop_loss_level: 0.20             # close if the mark falls to/below 0.20...
     low_entry_threshold: 0.20         # ...unless the leg was ENTERED below 0.20,
     low_entry_stop: 0.05              #    in which case the stop is 0.05 (longshot room)
