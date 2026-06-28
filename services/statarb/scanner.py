@@ -68,6 +68,8 @@ class ScanConfig:
     min_edge_bps: float = 30.0        # ...or returning < this ROI on locked capital
     min_liquidity_usdc: float = 200.0 # skip illiquid markets (their books are noise)
     max_markets: int = 600            # cap per pass (latency / rate-limit budget)
+    book_chunk: int = 50              # tokens per /books POST (a ~1200-token batch 400s)
+    book_fallback_cap: int = 300      # max singular /book GETs when the batch endpoint fails
 
 
 # ── a priced opportunity + the market metadata to identify/log/track it ──────
@@ -138,6 +140,57 @@ def _book_index(results: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return out
 
 
+async def _bounded_gather(factories: list, limit: int) -> list:
+    """Run zero-arg async factories with bounded concurrency; a failing one
+    yields None rather than aborting the batch."""
+    sem = asyncio.Semaphore(max(1, limit))
+
+    async def _run(f):
+        async with sem:
+            try:
+                return await f()
+            except Exception:  # noqa: BLE001
+                return None
+
+    return await asyncio.gather(*(_run(f) for f in factories))
+
+
+async def _fetch_book_index(
+    clob: ClobClient, tokens: list[str], cfg: ScanConfig, *, concurrency: int = 8
+) -> dict[str, dict[str, Any]]:
+    """Robustly fetch orderbooks for many tokens, keyed by token id.
+
+    A single 1200-token POST to /books returns 400 (Polymarket caps the batch),
+    so we validate + dedup the ids (they're uint256 decimal strings), fetch via
+    /books in chunks, then fall back to the proven singular /book GET for any
+    token the batch didn't return — covering both an oversized batch and an
+    outright-broken batch endpoint. Resilient: a failed chunk degrades, it
+    doesn't abort the pass. Emits a ``statarb_books`` line for visibility."""
+    valid = [t for t in dict.fromkeys(str(x) for x in tokens) if t.isdigit()]
+    if not valid:
+        return {}
+
+    chunks = [valid[i:i + cfg.book_chunk] for i in range(0, len(valid), cfg.book_chunk)]
+    index: dict[str, dict[str, Any]] = {}
+    for r in await _bounded_gather([lambda c=c: clob.books(c) for c in chunks], concurrency):
+        if isinstance(r, list) and r:
+            index.update(_book_index(r))
+    via_batch = len(index)
+
+    missing = [t for t in valid if t not in index]
+    capped = missing[:cfg.book_fallback_cap]
+    if capped:
+        singles = await _bounded_gather([lambda t=t: clob.book(t) for t in capped], concurrency)
+        for t, b in zip(capped, singles, strict=True):
+            if isinstance(b, dict) and b:
+                index[t] = b
+
+    log.info("statarb_books", requested=len(valid), via_batch=via_batch,
+             via_fallback=len(index) - via_batch, uncovered=len(missing) - len(capped),
+             chunk=cfg.book_chunk)
+    return index
+
+
 # ── binary complementarity scan ──────────────────────────────────────────────
 
 async def scan_binaries(
@@ -149,7 +202,7 @@ async def scan_binaries(
     if not tokens:
         return []
 
-    by_token = _book_index(await clob.books(tokens))
+    by_token = await _fetch_book_index(clob, tokens, cfg)
 
     found: list[ScanHit] = []
     for m, yes_t, no_t in pairs:
@@ -207,7 +260,7 @@ async def scan_field(
         if len(legs) < 2:
             continue
 
-        by_token = _book_index(await clob.books([t for _, t in legs]))
+        by_token = await _fetch_book_index(clob, [t for _, t in legs], cfg)
         outcome_asks, labels, token_ids = [], [], []
         ok = True
         for m, tok in legs:
