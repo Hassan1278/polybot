@@ -20,8 +20,10 @@ import asyncio
 import json
 import logging
 
-_OM = "https://historical-forecast-api.open-meteo.com/v1/forecast"
-_MODELS = "ecmwf_ifs04,gfs_seamless,icon_seamless"
+_OM = "https://previous-runs-api.open-meteo.com/v1/forecast"
+_DAILY = ["temperature_2m_max", "temperature_2m_max_previous_day1",
+          "temperature_2m_max_previous_day2", "temperature_2m_max_previous_day3"]
+_MODELS = ["ecmwf_ifs04", "gfs_seamless", "icon_seamless"]
 
 # (city, station, lat, lon, date, actual_high_°C from gamma ground truth)
 _PROBE = [
@@ -39,9 +41,7 @@ async def run():
             params = {
                 "latitude": lat, "longitude": lon,
                 "start_date": date, "end_date": date,
-                "daily": "temperature_2m_max,temperature_2m_max_previous_day1,"
-                         "temperature_2m_max_previous_day2",
-                "models": _MODELS, "timezone": "auto",
+                "daily": _DAILY, "models": _MODELS, "timezone": "auto",
             }
             try:
                 r = await c.get(_OM, params=params)
