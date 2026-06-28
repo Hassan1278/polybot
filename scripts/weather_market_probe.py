@@ -55,6 +55,9 @@ async def run(*, city, date, hours_before):
     out = []
     try:
         for mid, q in rows:
+            kind, _, bucket, _ = parse_q(q)
+            if kind != "highest":      # grade the highest-temp ladders only
+                continue
             m = await g.market_by_condition_id(mid)
             if not m:
                 continue
@@ -67,8 +70,8 @@ async def run(*, city, date, hours_before):
                 continue
             end_ts = int(datetime.fromisoformat(end.replace("Z", "+00:00")).timestamp())
             yes_won = (float(px[0]) > 0.5) if (m.get("closed") and px) else None
-            _, _, bucket, _ = parse_q(q)
-            hist = await clob.price_history(str(toks[0]), interval="max", fidelity=60)
+            raw = await clob.price_history(str(toks[0]), interval="max", fidelity=60)
+            hist = raw.get("history", []) if isinstance(raw, dict) else (raw or [])
             p, ts = _sample_at(hist, end_ts - hours_before * 3600)
             age_h = (end_ts - ts) / 3600 if ts else None
             out.append((bucket, p, age_h, yes_won, len(hist or [])))
