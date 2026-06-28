@@ -24,7 +24,7 @@ class Settings(BaseSettings):
 
     # mode
     trading_mode: Literal["paper", "live"] = "paper"
-    paper_starting_usdc: float = 10_000.0
+    paper_starting_usdc: float = 300.0
 
     # polymarket endpoints
     polymarket_clob_url: str = "https://clob.polymarket.com"
