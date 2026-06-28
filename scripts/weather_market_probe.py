@@ -33,7 +33,7 @@ def _sample_at(history, target_ts):
 
 
 async def run(*, city, date, hours_before):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from sqlalchemy import select
 
