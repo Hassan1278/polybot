@@ -73,6 +73,7 @@ class ScanConfig:
     book_chunk: int = 50              # tokens per /books POST (a ~1200-token batch 400s)
     book_fallback_cap: int = 300      # max singular /book GETs when the batch endpoint fails
     field_max_events: int = 30        # largest multi-outcome event_id groups to field-scan
+    field_min_coverage: float = 0.98  # require we hold ~all of an event's outcomes (else Σ is a phantom)
 
 
 # ── a priced opportunity + the market metadata to identify/log/track it ──────
@@ -254,7 +255,7 @@ async def scan_binaries(
 # groups from our OWN markets table via event_id and confirm each is a negRisk
 # (MECE) event from the gamma market payload's ``negRisk`` flag (static -> cached).
 
-_NEGRISK_CACHE: dict[str, bool] = {}        # event_id -> is negRisk (MECE); static, cached for the process
+_EVENT_META_CACHE: dict[str, tuple[bool, int]] = {}   # event_id -> (is_negRisk, true outcome count); static
 
 
 async def _event_groups(s, cfg: ScanConfig) -> list[tuple[str, list[tuple[str, str, str]]]]:
@@ -277,36 +278,48 @@ async def _event_groups(s, cfg: ScanConfig) -> list[tuple[str, list[tuple[str, s
     return multi[:cfg.field_max_events]
 
 
-async def _is_negrisk(gamma: GammaClient, event_id: str, sample_condition_id: str) -> bool:
-    """Whether an event_id group is a negRisk (MECE) event — exactly one YES wins.
-    Read from the gamma market payload's ``negRisk`` flag, cached (static per
-    event), so it costs one lookup per event over the life of the process."""
-    if event_id not in _NEGRISK_CACHE:
-        mk = await gamma.market_by_condition_id(sample_condition_id) or {}
-        _NEGRISK_CACHE[event_id] = bool(mk.get("negRisk"))
-    return _NEGRISK_CACHE[event_id]
+async def _event_meta(gamma: GammaClient, event_id: str) -> tuple[bool, int]:
+    """``(is_negRisk, true_outcome_count)`` for an event from its gamma payload,
+    cached (static). negRisk = MECE (exactly one YES wins); the true count is how
+    many outcomes the event REALLY has, so we can tell a complete field from a
+    longshot subset of one (e.g. holding 37 of a 128-candidate election)."""
+    if event_id not in _EVENT_META_CACHE:
+        try:
+            ev = await gamma.get(f"/events/{event_id}") or {}
+        except Exception:  # noqa: BLE001
+            ev = {}
+        mks = ev.get("markets") or []
+        is_neg = bool(ev.get("enableNegRisk") or (mks and mks[0].get("negRisk")))
+        _EVENT_META_CACHE[event_id] = (is_neg, len(mks))
+    return _EVENT_META_CACHE[event_id]
 
 
 async def scan_field(gamma: GammaClient, clob: ClobClient, cfg: ScanConfig) -> list[ScanHit]:
     """Scan multi-outcome **negRisk** events (grouped from our markets table by
-    event_id) for a buy-the-field violation: Σ best-YES-asks across all outcomes
+    event_id) for a buy-the-field violation: Σ best-YES-asks across ALL outcomes
     < $1. Only negRisk groups are MECE, so only those are field-arbable.
 
-    CAVEAT (measurement): the field-sum is over the legs WE hold for the event;
-    if our group is missing a leg, Σ is understated. So Σ comfortably ABOVE 1 is a
-    robust 'no arb', but an apparent Σ < 1 must be completeness-checked before it
-    is believed (and before any execution)."""
+    Completeness is enforced: "buy the field" guarantees $1 only if we hold EVERY
+    outcome that can still win. Our markets table mirrors just a subset of big
+    events (e.g. 37 of a 128-candidate election — all longshots), and a Σ<1 over a
+    subset is a PHANTOM (the winner may be an outcome we don't hold). So we require
+    near-full coverage of the event's true outcome count before trusting the sum."""
     async with session_scope() as s:
         groups = await _event_groups(s, cfg)
 
     found: list[ScanHit] = []
-    n_negrisk = n_incomplete = 0
+    n_negrisk = n_undersized = n_incomplete = 0
     sums: list[tuple[float, str, int]] = []     # (Σ best YES asks, event_id, n_legs)
 
     for eid, members in groups:
-        if not await _is_negrisk(gamma, eid, members[0][0]):
+        is_neg, true_count = await _event_meta(gamma, eid)
+        if not is_neg:
             continue                                   # not MECE -> never field-arb
         n_negrisk += 1
+        coverage = (len(members) / true_count) if true_count else 0.0
+        if coverage < cfg.field_min_coverage:
+            n_undersized += 1                          # we hold only a subset -> Σ is a phantom
+            continue
         by_token = await _fetch_book_index(clob, [tok for _, tok, _ in members], cfg)
         outcome_asks, labels, token_ids = [], [], []
         ok = True
@@ -334,11 +347,10 @@ async def scan_field(gamma: GammaClient, clob: ClobClient, cfg: ScanConfig) -> l
         if opp is not None:
             found.append(ScanHit(opp=opp, market_id=eid, slug=eid, question=labels[0]))
 
-    # Funnel: candidate groups -> negRisk -> (dropped: incomplete) -> evaluable -> opps.
-    # A tiny `evaluable` means a 0 is underpowered, not a verdict.
+    # Funnel: groups -> negRisk -> (dropped: undersized / incomplete) -> evaluable -> opps.
     log.info("statarb_field_universe", groups=len(groups), negrisk=n_negrisk,
-             incomplete=n_incomplete, evaluable=len(sums), opportunities=len(found),
-             negrisk_cached=len(_NEGRISK_CACHE))
+             undersized=n_undersized, incomplete=n_incomplete, evaluable=len(sums),
+             opportunities=len(found), cached=len(_EVENT_META_CACHE))
     if sums:
         sums.sort(key=lambda x: x[0])
         min_sum, min_event, min_legs = sums[0]
