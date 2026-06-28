@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -177,17 +178,19 @@ async def _fetch_book_index(
             index.update(_book_index(r))
     via_batch = len(index)
 
-    missing = [t for t in valid if t not in index]
-    capped = missing[:cfg.book_fallback_cap]
-    if capped:
+    # Singular fallback ONLY when the batch returned nothing at all (the endpoint
+    # is actually broken). When the batch works, tokens it omitted are genuinely
+    # book-less — resolved/closed markets that 404 — and retrying them one-by-one
+    # just floods 404s and burns a call per dead token every pass.
+    if via_batch == 0:
+        capped = valid[:cfg.book_fallback_cap]
         singles = await _bounded_gather([lambda t=t: clob.book(t) for t in capped], concurrency)
         for t, b in zip(capped, singles, strict=True):
             if isinstance(b, dict) and b:
                 index[t] = b
 
-    log.info("statarb_books", requested=len(valid), via_batch=via_batch,
-             via_fallback=len(index) - via_batch, uncovered=len(missing) - len(capped),
-             chunk=cfg.book_chunk)
+    log.info("statarb_books", requested=len(valid), priced=len(index),
+             via_batch=via_batch, via_fallback=len(index) - via_batch, chunk=cfg.book_chunk)
     return index
 
 
@@ -221,6 +224,10 @@ async def scan_binaries(
         )
         if opp is not None:
             found.append(ScanHit(opp=opp, market_id=m.market_id, slug=m.slug, question=m.question))
+
+    both = sum(1 for _, y, n in pairs if y in by_token and n in by_token)
+    log.info("statarb_binary_universe", markets=len(pairs), priced_both=both,
+             opportunities=len(found))
     return found
 
 
@@ -380,6 +387,10 @@ async def scan_loop(
 
 
 def _main() -> None:
+    # The CLOB read path logs a line per HTTP request; for a 600-market sweep
+    # that buries our structured output. Quiet the transport loggers.
+    for _name in ("httpx", "httpcore"):
+        logging.getLogger(_name).setLevel(logging.WARNING)
     ap = argparse.ArgumentParser(description="Intra-Polymarket stat-arb paper scan")
     ap.add_argument("--binary", action="store_true", help="binary scan only (skip field)")
     ap.add_argument("--loop", action="store_true", help="scan continuously with persistence tracking")
