@@ -56,6 +56,22 @@ def resolved_yes(outcome, outcomes) -> int | None:
     return None
 
 
+def outcome_from_history(history, *, hi=0.95, lo=0.05):
+    """Derive the YES outcome from a settled market's TERMINAL price: the last point
+    goes to ~1 (YES won) or ~0 (NO won). Returns 1 / 0, or None if the final price
+    is ambiguous (not yet settled, or disputed). Lets us use every ended market
+    instead of relying on our under-populated ``resolved`` flag."""
+    pts = sorted((t, p) for t, p in history if p is not None)
+    if not pts:
+        return None
+    last = pts[-1][1]
+    if last >= hi:
+        return 1
+    if last <= lo:
+        return 0
+    return None
+
+
 def sample_at_fraction(history, frac):
     """``history`` = [(ts, price), ...]; return ``(ts, price)`` at ~``frac`` through
     the trading life (by time), over genuine-uncertainty points only (0 < p < 1), or
@@ -111,16 +127,20 @@ def bias_summary(table):
 # ── I/O ──────────────────────────────────────────────────────────────────────
 
 
-async def _load_resolved(s, limit, category):
+async def _load_ended(s, limit, category):
+    from datetime import datetime, timezone
+
     from polybot.models import Market
     from sqlalchemy import select
+    now = datetime.now(tz=timezone.utc)
+    # Universe = markets whose end_date has passed. We do NOT filter on our
+    # `resolved` flag (under-populated by lagging resolution-tracking — ~18 rows);
+    # the outcome is read from each market's terminal price instead.
     q = select(Market.market_id, Market.yes_token_id, Market.outcome,
                Market.outcomes, Market.category).where(
-        Market.resolved.is_(True),
         Market.yes_token_id.is_not(None),
-        Market.outcome.is_not(None),
-        Market.outcomes.is_not(None),
         Market.end_date.is_not(None),
+        Market.end_date < now,
     )
     if category:
         q = q.where(Market.category == category)
@@ -160,8 +180,8 @@ async def run_backtest(*, limit, category, frac, n_buckets, fidelity, concurrenc
     from polybot.clients import ClobClient
     from polybot.db import session_scope
     async with session_scope() as s:
-        rows = await _load_resolved(s, limit, category)
-    print(f"loaded {len(rows)} resolved markets"
+        rows = await _load_ended(s, limit, category)
+    print(f"loaded {len(rows)} ended markets"
           f"{f' in {category}' if category else ''}; fetching price history…")
     if not rows:
         print("no resolved markets matched — nothing to do")
@@ -179,7 +199,9 @@ async def run_backtest(*, limit, category, frac, n_buckets, fidelity, concurrenc
         if not hist:
             no_history += 1
             continue
-        y = resolved_yes(r[2], r[3])
+        y = resolved_yes(r[2], r[3])        # authoritative if our DB recorded it…
+        if y is None:
+            y = outcome_from_history(hist)  # …else read it off the terminal price
         if y is None:
             no_outcome += 1
             continue

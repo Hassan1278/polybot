@@ -10,9 +10,18 @@ from __future__ import annotations
 from scripts.calibration_backtest import (
     bias_summary,
     calibration_table,
+    outcome_from_history,
     resolved_yes,
     sample_at_fraction,
 )
+
+# ── outcome_from_history (terminal price -> winner) ──────────────────────────
+
+def test_outcome_from_terminal_price():
+    assert outcome_from_history([(0, 0.4), (9, 0.98)]) == 1      # settled to ~1 -> YES won
+    assert outcome_from_history([(0, 0.6), (9, 0.01)]) == 0      # settled to ~0 -> NO won
+    assert outcome_from_history([(0, 0.5), (9, 0.55)]) is None   # still ambiguous -> unsettled
+    assert outcome_from_history([]) is None
 
 # ── resolved_yes (did the YES outcome win?) ──────────────────────────────────
 
