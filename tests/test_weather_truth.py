@@ -25,6 +25,9 @@ def test_parse_bucket_open_ended():
     assert lo["unit"] == "C" and lo["hi"] == 37.0 and lo["open"] is True and lo["lo"] < 0
     hi = parse_bucket("40°C or above")
     assert hi["lo"] == 40.0 and hi["open"] is True and hi["hi"] > 90
+    # the real Polymarket label is "or higher", not "or above"
+    hr = parse_bucket("38°C or higher")
+    assert hr["lo"] == 38.0 and hr["open"] is True
 
 
 def test_parse_bucket_no_number():

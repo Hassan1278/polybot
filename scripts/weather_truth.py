@@ -35,8 +35,8 @@ def parse_bucket(s):
     if not nums:
         return None
     unit = "F" if "F" in t.upper() else "C"
-    low = "below" in t.lower()
-    high = "above" in t.lower()
+    low = "below" in t.lower() or "lower" in t.lower()
+    high = "above" in t.lower() or "higher" in t.lower()
     if len(nums) >= 2 and "-" in t:
         lo, hi, mid, is_open = float(nums[0]), float(nums[1]), (nums[0] + nums[1]) / 2.0, False
     elif low:
