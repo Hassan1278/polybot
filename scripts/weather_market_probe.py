@@ -35,11 +35,10 @@ def _sample_at(history, target_ts):
 async def run(*, city, date, hours_before):
     from datetime import datetime
 
-    from sqlalchemy import select
-
     from polybot.clients import ClobClient, GammaClient
     from polybot.db import session_scope
     from polybot.models import Market
+    from sqlalchemy import select
 
     async with session_scope() as s:
         rows = (await s.execute(
