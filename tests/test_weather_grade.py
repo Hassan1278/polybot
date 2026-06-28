@@ -3,8 +3,35 @@ I/O is integration-level and runs on the VPS."""
 
 from __future__ import annotations
 
-from scripts.weather_grade import _daily_agg, forecast_error, summarize
+from scripts.weather_grade import (
+    _agg_by_date,
+    _bucket_c,
+    _daily_agg,
+    forecast_error,
+    summarize,
+    to_iso,
+)
 from scripts.weather_truth import parse_bucket
+
+
+def test_to_iso():
+    assert to_iso("June 21") == "2026-06-21"
+    assert to_iso("December 5") == "2026-12-05"
+    assert to_iso("garbage") is None
+
+
+def test_bucket_c_converts_fahrenheit():
+    b = _bucket_c(parse_bucket("between 92-93°F"))   # 92°F=33.33, 93°F=33.89
+    assert b["unit"] == "C"
+    assert abs(b["lo"] - 33.333) < 0.01 and abs(b["hi"] - 33.889) < 0.01
+
+
+def test_agg_by_date_slices_local_day_only():
+    times = ["2026-06-21T00:00", "2026-06-21T14:00", "2026-06-22T03:00"]
+    vals = [18.0, 29.0, 40.0]
+    assert _agg_by_date(times, vals, "2026-06-21", "highest") == 29.0   # ignores the 22nd
+    assert _agg_by_date(times, vals, "2026-06-22", "highest") == 40.0
+    assert _agg_by_date(times, vals, "2026-06-23", "highest") is None
 
 
 def test_daily_agg_max_min_empty():
