@@ -8,7 +8,24 @@ from __future__ import annotations
 
 import math
 
-from scripts.cross_venue_divergence import divergence_summary, logit, relative_divergence
+from scripts.cross_venue_divergence import (
+    _duration_seconds,
+    divergence_summary,
+    logit,
+    relative_divergence,
+)
+
+
+def test_duration_parsing_for_matching():
+    assert _duration_seconds("BTC Up or Down - 15 Min") == 900
+    assert _duration_seconds("ETH Up or Down - 5 Min") == 300
+    assert _duration_seconds("SOL Up or Down - Hourly") == 3600
+    assert _duration_seconds("XRP Up or Down - Daily") == 86400
+    # Polymarket time-range form -> computed window length
+    assert _duration_seconds("Bitcoin Up or Down - June 28, 8:00AM-8:15AM ET") == 900
+    assert _duration_seconds("Bitcoin Up or Down - June 28, 8:10AM-8:15AM ET") == 300
+    # undeterminable -> None (skip, don't contaminate the match)
+    assert _duration_seconds("Bitcoin Up or Down on June 28?") is None
 
 
 def test_logit_basic_and_clamped():

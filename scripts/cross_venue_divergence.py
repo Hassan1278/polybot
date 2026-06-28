@@ -24,6 +24,7 @@ import argparse
 import asyncio
 import logging
 import math
+import re
 
 _LIM_BASE = "https://api.limitless.exchange"
 
@@ -34,6 +35,33 @@ def logit(p):
     """Log-odds of a probability, clamped off the 0/1 boundary."""
     p = min(max(float(p), 1e-6), 1.0 - 1e-6)
     return math.log(p / (1.0 - p))
+
+
+def _duration_seconds(text):
+    """Window length (seconds) of an Up/Down market from its title/question, or
+    None if undeterminable. Matching REQUIRES the same duration: a 15-min and an
+    hourly market ending at the same instant are different bets (different starts)."""
+    t = (text or "").lower()
+    if "15 min" in t or "15-min" in t:        # check 15 before 5 ("15 min" contains "5 min")
+        return 900
+    if "5 min" in t or "5-min" in t:
+        return 300
+    if "hourly" in t or "1 hour" in t or "1-hour" in t:
+        return 3600
+    if "daily" in t:
+        return 86400
+    if "weekly" in t:
+        return 604800
+    m = re.search(r"(\d{1,2}):(\d{2})\s*([ap])m\s*[-–]\s*(\d{1,2}):(\d{2})\s*([ap])m", t)
+    if m:
+        h1, m1, ap1, h2, m2, ap2 = m.groups()
+
+        def _mins(h, mi, ap):
+            return (int(h) % 12 + (12 if ap == "p" else 0)) * 60 + int(mi)
+
+        d = (_mins(h2, m2, ap2) - _mins(h1, m1, ap1)) % (24 * 60)
+        return d * 60 if d > 0 else None
+    return None
 
 
 def relative_divergence(lim, poly):
@@ -98,8 +126,9 @@ async def _limitless_updown(client):
             if "up or down" not in t.lower() or not prices or not ets:
                 continue
             a = asset_of(t)
-            if a:
-                out.append((a, int(ets) // 1000, float(prices[0]), t, m.get("slug")))
+            dur = _duration_seconds(t)
+            if a and dur:
+                out.append((a, dur, int(ets) // 1000, float(prices[0]), t, m.get("slug")))
     return out
 
 
@@ -120,24 +149,31 @@ async def _polymarket_updown(s):
     out = []
     for q, sl, tok, ed in rows:
         a = asset_of(f"{q} {sl}")
-        if not a or not ed:
+        dur = _duration_seconds(f"{q} {sl}")
+        if not a or not ed or not dur:
             continue
         ts = int(ed.replace(tzinfo=timezone.utc).timestamp()) if ed.tzinfo is None else int(ed.timestamp())
-        out.append((a, ts, str(tok), q))
+        out.append((a, dur, ts, str(tok), q))
     return out
 
 
-def _match(lim, poly, tol=120):
-    """1:1 nearest match by asset + resolution time (within ``tol`` seconds).
-    Each Limitless market maps to its single closest Polymarket counterpart."""
+def _match(lim, poly, tol=90):
+    """1:1 nearest match by asset + DURATION + resolution time (within ``tol`` s).
+    Same asset + duration + end ⇒ same window (start = end − duration), so it's a
+    true same-market comparison — not a 15-min vs hourly that merely share an end.
+    Each Polymarket market is used at most once."""
+    used: set[int] = set()
     pairs = []
-    for la, le, lp, lt, lslug in lim:
-        best, bestd = None, tol + 1
-        for pa, pe, ptok, pq in poly:
-            if pa == la and abs(le - pe) < bestd:
-                best, bestd = (pa, pe, ptok, pq), abs(le - pe)
-        if best:
-            pairs.append((la, lp, lslug, lt, best[2], best[3]))   # asset, lim_up, slug, ltitle, ptok, pq
+    for la, ld, le, lp, lt, lslug in sorted(lim, key=lambda x: x[2]):
+        best, bi, bestd = None, None, tol + 1
+        for i, (pa, pd, pe, ptok, pq) in enumerate(poly):
+            if i in used or pa != la or pd != ld:
+                continue
+            if abs(le - pe) < bestd:
+                best, bi, bestd = (ptok, pq), i, abs(le - pe)
+        if best is not None:
+            used.add(bi)
+            pairs.append((la, lp, lslug, lt, best[0], best[1]))   # asset, lim_up, slug, ltitle, ptok, pq
     return pairs
 
 
