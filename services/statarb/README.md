@@ -62,16 +62,19 @@ fee-net — the `net_usdc` is what actually lands, not a top-of-book mirage.
 
 ```
 services/statarb/
-├── __init__.py        # public surface: the pure no-arb functions + result types
+├── __init__.py        # public surface: the pure no-arb functions + result types + tracker
 ├── relations.py       # PURE no-arb core — ladders in, ArbOpportunity|None out.
 │                      #   binary_complement_arb / field_buy_arb, depth-aware, fee-net.
 │                      #   No network, no DB, no clock → trivially + exhaustively testable.
+├── persistence.py     # PURE + clock-injected: follows each opportunity across scans →
+│                      #   lifespan, edge decay, per-leg drift. The "can we leg in?" metric.
 ├── scanner.py         # PAPER-FIRST wiring: Market table + Gamma events + CLOB books
-│                      #   → candidate baskets → relations.py → logged opportunities.
-│                      #   Runnable standalone: `python -m services.statarb.scanner`.
+│                      #   → candidate baskets → relations.py → ScanHit; --loop drives the
+│                      #   tracker. Runnable standalone: `python -m services.statarb.scanner`.
 └── README.md          # this file
 
-tests/test_statarb_relations.py   # exhaustive unit tests of the pure core (18 cases)
+tests/test_statarb_relations.py     # exhaustive unit tests of the pure no-arb core (18 cases)
+tests/test_statarb_persistence.py   # unit tests of the persistence tracker (10 cases)
 ```
 
 The split is deliberate: **all the math lives in `relations.py` and is pure**, so
@@ -101,13 +104,17 @@ That keeps one source of truth now and makes the later extraction a clean cut.
 
 1. **✅ Pure no-arb core + tests** — `relations.py`, `tests/test_statarb_relations.py`.
 2. **✅ Paper scanner** — `scanner.py`, binary + negRisk-field, observe-only.
-3. **▶ Validate** — run the paper scan against the live book; confirm logged
-   edges are real and survive the time it takes to lift both legs (the only real
-   risk here is *execution* risk: one leg fills, the other moves).
-4. **Execution** — atomic basket lift through `executor.live.place_live` under
-   `risk.preflight`; partial-fill / one-leg-hung handling; complete-set
-   redeem/merge to realize. Live-gated + kill-switch-aware like every other path.
-5. **Extract** — once proven, lift `services/statarb/` into the standalone repo
+3. **✅ Persistence tracking** — `persistence.py`; `--loop` measures how long each
+   edge survives, how it decays, and how its legs drift.
+4. **▶ Validate** — run the persistence loop against the live book; read the
+   `statarb_persistence_summary`: do edges survive a legging window, or vanish
+   within one pass? (The only real risk here is *execution* risk — one leg fills,
+   the other moves. This loop quantifies it.)
+5. **Execution** — atomic basket lift through `executor.live.place_live` under
+   `risk.preflight`; FAK/IOC so no leg rests passively; partial-fill / one-leg-hung
+   handling with orphan unwind; complete-set redeem/merge to realize. Live-gated +
+   kill-switch-aware like every other path.
+6. **Extract** — once proven, lift `services/statarb/` into the standalone repo
    `Miyokuna/polymarket-statarb` via `git subtree split` (history preserved),
    keeping polybot's clients as a thin dependency or vendored shim.
 
@@ -116,8 +123,15 @@ That keeps one source of truth now and makes the later extraction a clean cut.
 ## Run it (paper)
 
 ```bash
-python -m services.statarb.scanner            # one binary + field pass, logs + summary
-python -m services.statarb.scanner --binary   # binary only
-python -m services.statarb.scanner --loop     # continuous (30s)
-python -m pytest tests/test_statarb_relations.py -q
+python -m services.statarb.scanner                   # one binary + field pass, logs + summary
+python -m services.statarb.scanner --binary          # binary only
+python -m services.statarb.scanner --loop --interval 5   # persistence loop (tracks lifespans)
+python -m pytest tests/test_statarb_relations.py tests/test_statarb_persistence.py -q
 ```
+
+In `--loop`, watch these log events:
+- `statarb_opportunity_new` — an edge appeared (with its starting net + edge_bps).
+- `statarb_opportunity_expired` — it's gone; carries `lifetime_s`, `observations`,
+  net first/last/min, and per-leg `leg_drift` / `max_adverse_drift`.
+- `statarb_persistence_summary` — the rollup: `median_lifetime_s`,
+  `frac_survive_threshold` (cleared the legging window), `frac_single_pass` (fleeting).

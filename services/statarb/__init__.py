@@ -14,6 +14,7 @@ Public surface is the pure no-arb core; the scanner wires it to live data.
 
 from __future__ import annotations
 
+from services.statarb.persistence import PersistenceTracker, Tracked
 from services.statarb.relations import (
     ArbLeg,
     ArbOpportunity,
@@ -26,6 +27,8 @@ from services.statarb.relations import (
 __all__ = [
     "ArbLeg",
     "ArbOpportunity",
+    "PersistenceTracker",
+    "Tracked",
     "asks_from_book",
     "bids_from_book",
     "binary_complement_arb",
