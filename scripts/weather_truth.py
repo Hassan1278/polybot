@@ -1,15 +1,16 @@
 """weather_truth.py — STEP 2b-1: reconstruct the ACTUAL resolved highs, independent
 of the corrupt fills.
 
-Enumerate weather markets from the gamma-sourced market CATALOG (the `markets` table —
-gamma metadata, NOT the corrupt `fills`), resolve each one LIVE via gamma
-`market_by_condition_id`, reassemble each city-day "ladder" of buckets, and find the
-one bucket that resolved YES — that bucket IS where the day's high landed (to ~1°C /
-1–2°F). The output is the clean ground-truth dataset the forecast-grading step (2b-2)
-measures against. No forecasts, no fills.
+Enumerate recent weather markets from the gamma-sourced market CATALOG (the `markets`
+table — gamma metadata, NOT the corrupt `fills`), resolve them CONCURRENTLY and live via
+gamma, reassemble each city-day "ladder" of buckets, and find the one bucket that
+resolved YES — that bucket IS where the day's high landed (to ~1°C / 1–2°F). The output
+is the clean ground-truth dataset the forecast-grading step (2b-2) measures against.
+No forecasts, no fills.
 
-Run on the VPS:
-    docker compose exec -T executor python -m scripts.weather_truth
+The catalog holds ~thousands of weather markets (months of history), so default to the
+last 14 days; widen with --days. Run on the VPS:
+    docker compose exec -T executor python -m scripts.weather_truth --days 14
 """
 
 from __future__ import annotations
@@ -68,39 +69,60 @@ def _yes_won(m):
         return None
 
 
-async def run(*, cap):
+async def run(*, days, cap, conc):
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select
+
     from polybot.clients import GammaClient
     from polybot.db import session_scope
     from polybot.models import Market
-    from sqlalchemy import select
 
-    # enumerate from the gamma-sourced catalog (NOT fills)
+    now = datetime.now(tz=timezone.utc)
     async with session_scope() as s:
         rows = (await s.execute(
-            select(Market.market_id, Market.question)
-            .where(Market.question.op("~*")(r"temperature"))
+            select(Market.market_id, Market.question).where(
+                Market.question.op("~*")(r"temperature"),
+                Market.end_date.is_not(None),
+                Market.end_date >= now - timedelta(days=days),
+                Market.end_date <= now,
+            )
         )).all()
     cat = [(r.market_id, r.question) for r in rows if is_weather(r.question)]
+    cat.sort(key=lambda x: x[0])
     if cap:
         cat = cat[:cap]
-    print(f"catalog weather markets: {len(cat)} — resolving live via gamma (~1-2 min)…")
+    print(f"catalog weather markets (last {days}d): {len(cat)} — resolving live via gamma "
+          f"@ {conc} concurrent…")
 
     g = GammaClient()
-    legs, unresolved = [], 0
+    sem = asyncio.Semaphore(conc)
+
+    async def resolve(mid):
+        async with sem:
+            try:
+                out = await g.get("/markets", params={"condition_ids": mid, "closed": "true"})
+            except Exception:  # noqa: BLE001
+                return mid, None
+        m = out[0] if isinstance(out, list) and out else None
+        return mid, _yes_won(m)
+
     try:
-        for mid, q in cat:
-            m = await g.market_by_condition_id(mid)
-            kind, city, bucket, date = parse_q(q)
-            pb = parse_bucket(bucket) if bucket else None
-            yw = _yes_won(m)
-            if yw is None:
-                unresolved += 1
-            if not (city and date and pb is not None and yw is not None):
-                continue
-            legs.append({"city": city, "date": date, "kind": kind, "bucket": bucket,
-                         "parsed": pb, "yes": yw})
+        res = dict(await asyncio.gather(*[resolve(mid) for mid, _ in cat]))
     finally:
         await g.close()
+
+    legs, unresolved = [], 0
+    for mid, q in cat:
+        yw = res.get(mid)
+        kind, city, bucket, date = parse_q(q)
+        pb = parse_bucket(bucket) if bucket else None
+        if yw is None:
+            unresolved += 1
+        if not (city and date and pb is not None and yw is not None):
+            continue
+        legs.append({"city": city, "date": date, "kind": kind, "bucket": bucket,
+                     "parsed": pb, "yes": yw})
 
     groups = defaultdict(list)
     for x in legs:
@@ -139,9 +161,11 @@ def main():
     for _n in ("httpx", "httpcore"):
         logging.getLogger(_n).setLevel(logging.WARNING)
     ap = argparse.ArgumentParser(description="Step 2b-1: reconstruct actual resolved highs (catalog + gamma)")
-    ap.add_argument("--cap", type=int, default=0, help="limit markets resolved (0 = all)")
+    ap.add_argument("--days", type=int, default=14, help="lookback window on market end_date")
+    ap.add_argument("--cap", type=int, default=0, help="limit markets resolved (0 = all in window)")
+    ap.add_argument("--conc", type=int, default=20, help="concurrent gamma resolutions")
     args = ap.parse_args()
-    asyncio.run(run(cap=args.cap))
+    asyncio.run(run(days=args.days, cap=args.cap, conc=args.conc))
 
 
 if __name__ == "__main__":
