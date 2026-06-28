@@ -132,81 +132,97 @@ async def _limitless_updown(client):
     return out
 
 
-async def _polymarket_updown(s):
-    """Active Polymarket Up/Down markets: list of (asset, end_ts, yes_token, question)."""
-    from datetime import datetime, timezone
+async def _polymarket_updown(gamma):
+    """LIVE Polymarket Up/Down crypto markets from gamma (NOT our stale DB, which
+    stopped ingesting crypto): (asset, duration, end_ts, up_price, question).
+    Filters to windows ending in the next 6h — gamma's active flag also returns
+    stale never-closed markets, so a date window is required."""
+    import json
+    from datetime import datetime, timedelta, timezone
 
     from polybot.asset_direction import asset_of
-    from polybot.models import Market
-    from sqlalchemy import select
     now = datetime.now(tz=timezone.utc)
-    rows = (await s.execute(
-        select(Market.question, Market.slug, Market.yes_token_id, Market.end_date).where(
-            Market.resolved.is_(False), Market.end_date > now,
-            Market.question.ilike("%up or down%"), Market.yes_token_id.is_not(None),
-        )
-    )).all()
+    mk = await gamma.get("/markets", params={
+        "active": "true", "closed": "false", "limit": 500,
+        "end_date_min": now.isoformat(),
+        "end_date_max": (now + timedelta(hours=6)).isoformat(),
+        "order": "endDate", "ascending": "true",
+    }) or []
     out = []
-    for q, sl, tok, ed in rows:
-        a = asset_of(f"{q} {sl}")
-        dur = _duration_seconds(f"{q} {sl}")
-        if not a or not ed or not dur:
+    for m in mk:
+        q = m.get("question", "") or ""
+        if "up or down" not in q.lower():
             continue
-        ts = int(ed.replace(tzinfo=timezone.utc).timestamp()) if ed.tzinfo is None else int(ed.timestamp())
-        out.append((a, dur, ts, str(tok), q))
+        a = asset_of(q)
+        dur = _duration_seconds(q)
+        end, px = m.get("endDate"), m.get("outcomePrices")
+        if not (a and dur and end and px):
+            continue
+        try:
+            prices = json.loads(px) if isinstance(px, str) else px
+            up = float(prices[0])
+            ets = int(datetime.fromisoformat(end.replace("Z", "+00:00")).timestamp())
+        except (ValueError, TypeError, IndexError):
+            continue
+        out.append((a, dur, ets, up, q))
     return out
 
 
-def _match(lim, poly, tol=90):
+def _match(lim, poly, tol=60):
     """1:1 nearest match by asset + DURATION + resolution time (within ``tol`` s).
     Same asset + duration + end ⇒ same window (start = end − duration), so it's a
     true same-market comparison — not a 15-min vs hourly that merely share an end.
-    Each Polymarket market is used at most once."""
+
+    ``tol`` only resolves sub-minute clock-boundary skew between the two venues'
+    resolution timestamps: the shortest window is 5 min (300 s), so distinct
+    same-duration windows are ≥300 s apart and any tol < 150 can never confuse
+    adjacent windows. Both prices are the venues' LIVE quotes; each Polymarket
+    market is used at most once. Returns (asset, lim_up, poly_up, slug, skew_s)
+    where skew_s = lim_end − poly_end (how far the venues' resolution times differ)."""
     used: set[int] = set()
     pairs = []
-    for la, ld, le, lp, lt, lslug in sorted(lim, key=lambda x: x[2]):
+    for la, ld, le, lp, _lt, lslug in sorted(lim, key=lambda x: x[2]):
         best, bi, bestd = None, None, tol + 1
-        for i, (pa, pd, pe, ptok, pq) in enumerate(poly):
+        for i, (pa, pd, pe, pup, _pq) in enumerate(poly):
             if i in used or pa != la or pd != ld:
                 continue
             if abs(le - pe) < bestd:
-                best, bi, bestd = (ptok, pq), i, abs(le - pe)
+                best, bi, bestd = (pup, le - pe), i, abs(le - pe)
         if best is not None:
             used.add(bi)
-            pairs.append((la, lp, lslug, lt, best[0], best[1]))   # asset, lim_up, slug, ltitle, ptok, pq
+            pairs.append((la, lp, best[0], lslug, best[1]))   # asset, lim_up, poly_up, slug, skew_s
     return pairs
 
 
 async def run(*, loop, interval):
     import httpx
-    from polybot.clients import ClobClient
-    from polybot.db import session_scope
+    from polybot.clients import GammaClient
     seen: dict[str, float] = {}     # lim_slug -> latest log-odds diff (distinct-pair sample)
     passes = 0
     while True:
         try:
             async with httpx.AsyncClient(timeout=20) as hc:
                 lim = await _limitless_updown(hc)
-            async with session_scope() as s:
-                poly = await _polymarket_updown(s)
-            pairs = _match(lim, poly)
-            clob = ClobClient()
-            rows = []
+            gamma = GammaClient()
             try:
-                for asset, lim_up, slug, _ltitle, ptok, _pq in pairs:
-                    poly_up = float(await clob.midpoint(ptok) or 0.0)
-                    rd = relative_divergence(lim_up, poly_up)
-                    if rd is None:
-                        continue
-                    seen[slug] = rd["log_odds_diff"]
-                    rows.append((asset, lim_up, poly_up, rd))
+                poly = await _polymarket_updown(gamma)
             finally:
-                await clob.close()
+                await gamma.close()
+            pairs = _match(lim, poly)
+            rows = []
+            for asset, lim_up, poly_up, slug, skew in pairs:
+                rd = relative_divergence(lim_up, poly_up)
+                if rd is None:
+                    continue
+                seen[slug] = rd["log_odds_diff"]
+                rows.append((asset, lim_up, poly_up, rd, skew))
 
-            print(f"\n[pass {passes}] aligned pairs: {len(rows)}  | distinct sample: {len(seen)}")
-            print(f"{'asset':>6} {'LIM':>7} {'POLY':>7} {'ratio':>7} {'log-odds Δ':>11}")
-            for asset, lu, pu, rd in sorted(rows, key=lambda x: -abs(x[3]["log_odds_diff"])):
-                print(f"{asset:>6} {lu:>7.3f} {pu:>7.3f} {rd['ratio']:>7.2f} {rd['log_odds_diff']:>+11.3f}")
+            print(f"\n[pass {passes}] aligned pairs: {len(rows)}  | distinct sample: {len(seen)}"
+                  f"  (lim={len(lim)} poly={len(poly)} candidates)")
+            print(f"{'asset':>6} {'LIM':>7} {'POLY':>7} {'ratio':>7} {'log-odds Δ':>11} {'skew_s':>7}")
+            for asset, lu, pu, rd, skew in sorted(rows, key=lambda x: -abs(x[3]["log_odds_diff"])):
+                print(f"{asset:>6} {lu:>7.3f} {pu:>7.3f} {rd['ratio']:>7.2f} "
+                      f"{rd['log_odds_diff']:>+11.3f} {skew:>+7d}")
             summ = divergence_summary(list(seen.values()))
             if summ["n"] >= 1:
                 print(f"\nSAMPLE (n={summ['n']} distinct pairs): "
