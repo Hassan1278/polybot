@@ -75,7 +75,7 @@ def _verdict(s):
     return "efficient / noise (no edge)"
 
 
-async def run(*, days, cap, conc, chunk, px_conc, bias, hours_before):
+async def run(*, days, cap, conc, chunk, px_conc, bias, hours_before, haircut):
     import httpx
     from polybot.clients import ClobClient
 
@@ -170,23 +170,24 @@ async def run(*, days, cap, conc, chunk, px_conc, bias, hours_before):
     med = vols[len(vols) // 2] if vols else 0.0
 
     def show(name, rows):
-        s = summarize_edge([(h, p) for h, p, _v in rows])
+        # haircut models the half-spread + fee you actually pay to enter
+        s = summarize_edge([(h, p + haircut) for h, p, _v in rows])
         if not s.get("n"):
             print(f"  {name}: (no data)")
             return
         twose = f"±{2 * s['se']:.3f}" if s["se"] else ""
-        print(f"  {name}: edge {s['edge']:+.3f}/$1 {twose}  (hit {s['hit']:.0%} @ avg price "
+        print(f"  {name}: edge {s['edge']:+.3f}/$1 {twose}  (hit {s['hit']:.0%} @ avg cost "
               f"{s['price']:.3f}, n={s['n']})  -> {_verdict(s)}")
-        lo = [(h, p) for h, p, v in rows if v < med]
-        hi = [(h, p) for h, p, v in rows if v >= med]
+        lo = [(h, p + haircut) for h, p, v in rows if v < med]
+        hi = [(h, p + haircut) for h, p, v in rows if v >= med]
         sl, sh = summarize_edge(lo), summarize_edge(hi)
         if sl.get("n") and sh.get("n"):
             print(f"      by volume:  low (<${med:,.0f}) edge {sl['edge']:+.3f} (n={sl['n']})   "
                   f"high edge {sh['edge']:+.3f} (n={sh['n']})")
 
     print("\n===== MONEY TEST — bet ICON's forecast bucket at the 24h market price =====")
-    print(f"(bias-correction = +{bias}°, sample {hours_before}h before resolution; "
-          "edge = mean(settle − price), spread ignored)")
+    print(f"(bias-correction = +{bias}°, sample {hours_before}h before resolution, "
+          f"haircut {haircut:.3f}/bet; edge = mean(settle − price − haircut))")
     show("RAW ICON 24h ", raw)
     show("ICON + bias  ", corr)
 
@@ -199,12 +200,14 @@ def main():
     ap.add_argument("--cap", type=int, default=0)
     ap.add_argument("--conc", type=int, default=20, help="gamma resolution concurrency")
     ap.add_argument("--chunk", type=int, default=15, help="stations per Open-Meteo call")
-    ap.add_argument("--px-conc", type=int, default=8, help="concurrent CLOB price-history calls")
+    ap.add_argument("--px-conc", type=int, default=4, help="concurrent CLOB price-history calls")
     ap.add_argument("--bias", type=float, default=0.4, help="°C added to ICON (the WU-hot correction)")
     ap.add_argument("--hours-before", type=int, default=24, help="how long before resolution to price")
+    ap.add_argument("--haircut", type=float, default=0.0, help="cost/bet for spread+fees (e.g. 0.03)")
     args = ap.parse_args()
     asyncio.run(run(days=args.days, cap=args.cap, conc=args.conc, chunk=args.chunk,
-                    px_conc=args.px_conc, bias=args.bias, hours_before=args.hours_before))
+                    px_conc=args.px_conc, bias=args.bias, hours_before=args.hours_before,
+                    haircut=args.haircut))
 
 
 if __name__ == "__main__":
