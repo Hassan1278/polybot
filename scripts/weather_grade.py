@@ -10,6 +10,10 @@ market's RESOLUTION-STATION coordinates, in the bucket's native unit, and comput
   • the systematic-bias check — does the settled high run consistently hotter/cooler
     than the forecast (e.g. the Wunderground airport-max-runs-hot effect)?
 
+DATA FIDELITY: also pulls ERA5 reanalysis (an independent "what actually happened") and
+compares it to the WU resolution — isolating whether the WU number itself is a faithful,
+bettable representation of reality or an idiosyncratic source that caps precision.
+
 STATION_COORDS are the resolution airports from the step-1 gamma descriptions — verify/
 extend as needed; unmapped cities are skipped and reported. Run on the VPS:
     docker compose exec -T executor python -m scripts.weather_grade --days 14
@@ -25,6 +29,7 @@ from collections import defaultdict
 from scripts.weather_truth import reconstruct
 
 _OM = "https://previous-runs-api.open-meteo.com/v1/forecast"
+_ARCHIVE = "https://archive-api.open-meteo.com/v1/archive"   # ERA5 reanalysis "actual"
 _HOURLY = ["temperature_2m", "temperature_2m_previous_day1", "temperature_2m_previous_day2"]
 _MODELS = ["icon_seamless", "gfs_seamless", "ecmwf_ifs025"]
 _LEADS = [("now", ""), ("24h", "_previous_day1"), ("48h", "_previous_day2")]
@@ -103,6 +108,23 @@ async def _forecast(client, lat, lon, date, unit, kind):
     return out
 
 
+async def _era5_actual(client, lat, lon, iso, unit, kind):
+    """ERA5 reanalysis daily max/min — an INDEPENDENT 'what actually happened' at the
+    station, to compare against the Wunderground resolution. None if unavailable (ERA5
+    lags ~5 days, so the most recent days won't be in yet)."""
+    var = "temperature_2m_max" if kind == "highest" else "temperature_2m_min"
+    try:
+        r = await client.get(_ARCHIVE, params={
+            "latitude": lat, "longitude": lon, "start_date": iso, "end_date": iso,
+            "daily": var, "timezone": "auto", "temperature_unit": unit})
+        if r.status_code != 200:
+            return None
+        d = (r.json() or {}).get("daily", {}).get(var)
+    except Exception:  # noqa: BLE001
+        return None
+    return d[0] if isinstance(d, list) and d and isinstance(d[0], (int, float)) else None
+
+
 async def run(*, days, cap, conc, fc_conc):
     import httpx
 
@@ -142,6 +164,10 @@ async def run(*, days, cap, conc, fc_conc):
         lat, lon = STATION_COORDS[city]
         async with sem:
             fc = await _forecast(client, lat, lon, iso, unit, kind)
+            era5 = await _era5_actual(client, lat, lon, iso, unit, kind)
+        e_err = forecast_error(era5, bucket)
+        glob[("era5_actual", "obs")].append(e_err)
+        bycity[city][("era5_actual", "obs")].append(e_err)
         for key, dagg in fc.items():
             err = forecast_error(dagg, bucket)
             glob[key].append(err)
@@ -149,6 +175,21 @@ async def run(*, days, cap, conc, fc_conc):
 
     async with httpx.AsyncClient(timeout=30) as client:
         await asyncio.gather(*[grade(client, *t) for t in targets])
+
+    fid = summarize(glob[("era5_actual", "obs")])
+    print("\n===== DATA FIDELITY — ERA5 reanalysis 'actual' vs the WU resolution =====")
+    if fid["n"]:
+        sign = "HOTTER" if (fid["bias"] or 0) < 0 else "COOLER"
+        print(f"  n={fid['n']}   MAE {fid['mae']:.2f}°   bias {fid['bias']:+.2f}°   "
+              f"in-bucket {fid['hit'] * 100:.0f}%")
+        print(f"  → the WU settlement runs {abs(fid['bias'] or 0):.2f}° {sign} than independent "
+              "reanalysis on average.")
+        print("    small MAE + low bias = WU faithfully tracks reality → a good forecast can hit "
+              "the bucket (bettable).")
+        print("    big/biased = WU is idiosyncratic → either it caps how precisely anyone can bet, "
+              "OR a systematic bias IS the edge.")
+    else:
+        print("  (no ERA5 data — likely the dates are within ERA5's ~5-day lag; widen --days)")
 
     print("\n===== MARGIN OF FAILURE — forecast vs settled high =====")
     print(f"{'model':>14} {'lead':>5} {'n':>5} {'MAE':>6} {'bias':>7} {'hit%':>6}")
