@@ -72,6 +72,7 @@ class ScanConfig:
     max_markets: int = 600            # cap per pass (latency / rate-limit budget)
     book_chunk: int = 50              # tokens per /books POST (a ~1200-token batch 400s)
     book_fallback_cap: int = 300      # max singular /book GETs when the batch endpoint fails
+    field_max_events: int = 30        # largest multi-outcome event_id groups to field-scan
 
 
 # ── a priced opportunity + the market metadata to identify/log/track it ──────
@@ -247,94 +248,106 @@ async def scan_binaries(
     return found
 
 
-# ── multi-outcome "buy the field" scan (negRisk-gated) ───────────────────────
+# ── multi-outcome "buy the field" scan (negRisk, grouped by event_id) ────────
+#
+# The events endpoint doesn't nest multi-outcome markets, so we reconstruct the
+# groups from our OWN markets table via event_id and confirm each is a negRisk
+# (MECE) event from the gamma market payload's ``negRisk`` flag (static -> cached).
 
-def _yes_token_of(gamma_market: dict[str, Any]) -> str | None:
-    """The YES (outcomes[0] ↔ clobTokenIds[0]) token of a Gamma market payload.
-    For a negRisk event each child market is one outcome; its YES = that outcome
-    winning."""
-    toks = gamma_market.get("clobTokenIds") or gamma_market.get("clob_token_ids")
-    if isinstance(toks, str):
-        import json
-        try:
-            toks = json.loads(toks)
-        except (ValueError, TypeError):
-            toks = None
-    if isinstance(toks, list) and toks:
-        return str(toks[0])
-    return None
+_NEGRISK_CACHE: dict[str, bool] = {}        # event_id -> is negRisk (MECE); static, cached for the process
 
 
-async def scan_field(
-    gamma: GammaClient, clob: ClobClient, cfg: ScanConfig, *, event_limit: int = 200
-) -> list[ScanHit]:
-    """Scan active **negRisk** events for a buy-the-field violation. We only ever
-    field-arb a group Gamma marks ``negRisk=true`` — that's the venue promising
-    the outcomes are mutually-exclusive-and-exhaustive (exactly one YES wins)."""
-    events = await gamma.events(limit=event_limit, active=True)
+async def _event_groups(s, cfg: ScanConfig) -> list[tuple[str, list[tuple[str, str, str]]]]:
+    """Multi-outcome groups from our markets table, keyed by event_id:
+    ``[(event_id, [(market_id, yes_token, label), ...]), ...]``, biggest first,
+    capped at ``field_max_events``. No per-market liquidity filter — a field needs
+    ALL its legs, longshots included."""
+    rows = (await s.execute(
+        select(Market.event_id, Market.market_id, Market.yes_token_id, Market.question).where(
+            Market.resolved.is_(False),
+            Market.event_id.is_not(None),
+            Market.yes_token_id.is_not(None),
+        )
+    )).all()
+    groups: dict[str, list[tuple[str, str, str]]] = {}
+    for eid, mid, tok, q in rows:
+        groups.setdefault(str(eid), []).append((mid, str(tok), (q or mid)[:48]))
+    multi = [(eid, mem) for eid, mem in groups.items() if len(mem) >= 2]
+    multi.sort(key=lambda x: len(x[1]), reverse=True)
+    return multi[:cfg.field_max_events]
+
+
+async def _is_negrisk(gamma: GammaClient, event_id: str, sample_condition_id: str) -> bool:
+    """Whether an event_id group is a negRisk (MECE) event — exactly one YES wins.
+    Read from the gamma market payload's ``negRisk`` flag, cached (static per
+    event), so it costs one lookup per event over the life of the process."""
+    if event_id not in _NEGRISK_CACHE:
+        mk = await gamma.market_by_condition_id(sample_condition_id) or {}
+        _NEGRISK_CACHE[event_id] = bool(mk.get("negRisk"))
+    return _NEGRISK_CACHE[event_id]
+
+
+async def scan_field(gamma: GammaClient, clob: ClobClient, cfg: ScanConfig) -> list[ScanHit]:
+    """Scan multi-outcome **negRisk** events (grouped from our markets table by
+    event_id) for a buy-the-field violation: Σ best-YES-asks across all outcomes
+    < $1. Only negRisk groups are MECE, so only those are field-arbable.
+
+    CAVEAT (measurement): the field-sum is over the legs WE hold for the event;
+    if our group is missing a leg, Σ is understated. So Σ comfortably ABOVE 1 is a
+    robust 'no arb', but an apparent Σ < 1 must be completeness-checked before it
+    is believed (and before any execution)."""
+    async with session_scope() as s:
+        groups = await _event_groups(s, cfg)
+
     found: list[ScanHit] = []
-    n_negrisk = n_thin = n_incomplete = 0
-    sums: list[tuple[float, str]] = []      # (Σ best YES asks, event) per fully-priced negRisk event
+    n_negrisk = n_incomplete = 0
+    sums: list[tuple[float, str, int]] = []     # (Σ best YES asks, event_id, n_legs)
 
-    for ev in events or []:
-        if not ev.get("negRisk"):
-            continue                                   # MECE not guaranteed -> never field-arb
+    for eid, members in groups:
+        if not await _is_negrisk(gamma, eid, members[0][0]):
+            continue                                   # not MECE -> never field-arb
         n_negrisk += 1
-        mkts = [m for m in (ev.get("markets") or []) if not m.get("closed")]
-        legs = [(m, _yes_token_of(m)) for m in mkts]
-        legs = [(m, t) for m, t in legs if t]
-        if len(legs) < 2:
-            n_thin += 1                                # <2 priceable outcomes -> no field to buy
-            continue
-
-        by_token = await _fetch_book_index(clob, [t for _, t in legs], cfg)
+        by_token = await _fetch_book_index(clob, [tok for _, tok, _ in members], cfg)
         outcome_asks, labels, token_ids = [], [], []
         ok = True
-        for m, tok in legs:
+        for _mid, tok, label in members:
             book = by_token.get(tok)
             if book is None:
                 ok = False
                 break
             outcome_asks.append(asks_from_book(book))
-            labels.append(str(m.get("groupItemTitle") or m.get("question") or tok)[:48])
+            labels.append(label)
             token_ids.append(tok)
         if not ok:
             n_incomplete += 1                          # a missing leg breaks the $1 guarantee
             continue
 
-        # field near-miss: Σ best ask across outcomes (top-of-book buy-the-field cost)
         bests = [best_ask(a) for a in outcome_asks]
         if all(b is not None for b in bests):
-            sums.append((sum(bests), str(ev.get("slug") or ev.get("title") or ev.get("id") or "")))
+            sums.append((sum(bests), eid, len(bests)))
 
         opp = field_buy_arb(
-            outcome_asks,
-            labels=labels,
-            token_ids=token_ids,
-            fee_bps=cfg.fee_bps,
-            gas_usdc=cfg.gas_usdc,
-            min_edge_usdc=cfg.min_edge_usdc,
-            min_edge_bps=cfg.min_edge_bps,
+            outcome_asks, labels=labels, token_ids=token_ids,
+            fee_bps=cfg.fee_bps, gas_usdc=cfg.gas_usdc,
+            min_edge_usdc=cfg.min_edge_usdc, min_edge_bps=cfg.min_edge_bps,
         )
         if opp is not None:
-            found.append(ScanHit(
-                opp=opp, market_id=str(ev.get("id") or ""),
-                slug=str(ev.get("slug") or ""), question=str(ev.get("title") or ""),
-            ))
+            found.append(ScanHit(opp=opp, market_id=eid, slug=eid, question=labels[0]))
 
-    # The funnel: total events -> negRisk -> (dropped: thin / incomplete) -> evaluable -> opps.
-    # If `evaluable` is tiny, a 0 here is underpowered, not a verdict.
-    log.info("statarb_field_universe", events=len(events or []), negrisk=n_negrisk,
-             thin=n_thin, incomplete=n_incomplete, evaluable=len(sums), opportunities=len(found))
+    # Funnel: candidate groups -> negRisk -> (dropped: incomplete) -> evaluable -> opps.
+    # A tiny `evaluable` means a 0 is underpowered, not a verdict.
+    log.info("statarb_field_universe", groups=len(groups), negrisk=n_negrisk,
+             incomplete=n_incomplete, evaluable=len(sums), opportunities=len(found),
+             negrisk_cached=len(_NEGRISK_CACHE))
     if sums:
         sums.sort(key=lambda x: x[0])
-        min_sum, min_event = sums[0]
+        min_sum, min_event, min_legs = sums[0]
         log.info("statarb_field_near_miss", evaluable=len(sums), min_sum=round(min_sum, 4),
-                 min_event=min_event[:48],
-                 lt_1_00=sum(1 for s, _ in sums if s < 1.00),
-                 lt_1_01=sum(1 for s, _ in sums if s < 1.01),
-                 lt_1_02=sum(1 for s, _ in sums if s < 1.02),
-                 lt_1_05=sum(1 for s, _ in sums if s < 1.05))
+                 min_event=min_event, min_legs=min_legs,
+                 lt_1_00=sum(1 for s, _, _ in sums if s < 1.00),
+                 lt_1_01=sum(1 for s, _, _ in sums if s < 1.01),
+                 lt_1_02=sum(1 for s, _, _ in sums if s < 1.02),
+                 lt_1_05=sum(1 for s, _, _ in sums if s < 1.05))
     return found
 
 
