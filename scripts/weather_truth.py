@@ -72,11 +72,10 @@ def _yes_won(m):
 async def run(*, days, cap, conc):
     from datetime import datetime, timedelta, timezone
 
-    from sqlalchemy import select
-
     from polybot.clients import GammaClient
     from polybot.db import session_scope
     from polybot.models import Market
+    from sqlalchemy import select
 
     now = datetime.now(tz=timezone.utc)
     async with session_scope() as s:
