@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from services.statarb.relations import (
     asks_from_book,
+    best_ask,
     bids_from_book,
     binary_complement_arb,
     field_buy_arb,
@@ -29,6 +30,13 @@ def test_book_helpers_extract_sides_and_tolerate_empty():
     assert bids_from_book(book) == [{"price": "0.3", "size": "5"}]
     assert asks_from_book({}) == [] and asks_from_book(None) == []
     assert bids_from_book({}) == [] and bids_from_book(None) == []
+
+
+def test_best_ask_is_lowest_valid_level():
+    assert best_ask([_lv(0.45, 10), _lv(0.40, 5), _lv(0.50, 100)]) == 0.40   # cheapest
+    assert best_ask([]) is None
+    assert best_ask(None) is None
+    assert best_ask([{"size": "10"}]) is None                                # malformed -> none
 
 
 # ── binary YES/NO complementarity ────────────────────────────────────────────

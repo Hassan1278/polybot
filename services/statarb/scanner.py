@@ -49,6 +49,7 @@ from services.statarb.persistence import PersistenceTracker
 from services.statarb.relations import (
     ArbOpportunity,
     asks_from_book,
+    best_ask,
     binary_complement_arb,
     field_buy_arb,
 )
@@ -208,13 +209,17 @@ async def scan_binaries(
     by_token = await _fetch_book_index(clob, tokens, cfg)
 
     found: list[ScanHit] = []
+    sums: list[tuple[float, str]] = []      # (best ask_yes + ask_no, market) per fully-priced market
     for m, yes_t, no_t in pairs:
         yb, nb = by_token.get(yes_t), by_token.get(no_t)
         if yb is None or nb is None:
             continue
+        ya, na = asks_from_book(yb), asks_from_book(nb)
+        by, bn = best_ask(ya), best_ask(na)
+        if by is not None and bn is not None:
+            sums.append((by + bn, m.slug or m.market_id))   # top-of-book complement cost
         opp = binary_complement_arb(
-            asks_from_book(yb),
-            asks_from_book(nb),
+            ya, na,
             yes_token=yes_t,
             no_token=no_t,
             fee_bps=cfg.fee_bps,
@@ -225,9 +230,20 @@ async def scan_binaries(
         if opp is not None:
             found.append(ScanHit(opp=opp, market_id=m.market_id, slug=m.slug, question=m.question))
 
-    both = sum(1 for _, y, n in pairs if y in by_token and n in by_token)
-    log.info("statarb_binary_universe", markets=len(pairs), priced_both=both,
+    log.info("statarb_binary_universe", markets=len(pairs), priced_both=len(sums),
              opportunities=len(found))
+    # Near-miss: how close does the book actually get to the $1 no-arb line? A
+    # min_sum just above 1.0 means it grazes (fleeting violations plausible —
+    # worth a streaming watchlist); a min_sum well above 1.0 is a structural wall.
+    if sums:
+        sums.sort(key=lambda x: x[0])
+        min_sum, min_market = sums[0]
+        log.info("statarb_near_miss", priced=len(sums), min_sum=round(min_sum, 4),
+                 min_market=min_market[:48],
+                 lt_1_00=sum(1 for s, _ in sums if s < 1.00),
+                 lt_1_01=sum(1 for s, _ in sums if s < 1.01),
+                 lt_1_02=sum(1 for s, _ in sums if s < 1.02),
+                 lt_1_05=sum(1 for s, _ in sums if s < 1.05))
     return found
 
 

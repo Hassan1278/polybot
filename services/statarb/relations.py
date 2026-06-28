@@ -87,6 +87,14 @@ def bids_from_book(book: dict[str, Any] | None) -> list[dict[str, Any]]:
     return list((book or {}).get("bids") or [])
 
 
+def best_ask(levels: Sequence[dict[str, Any]] | None) -> float | None:
+    """The lowest ask price across ``levels`` (top of book) — the cheapest share
+    you could buy — or None if there's no valid level. Used to measure how close
+    a complement gets to the no-arb line ($1) without committing to depth."""
+    lad = _ladder(levels)
+    return lad[0][0] if lad else None
+
+
 def _ladder(levels: Sequence[dict[str, Any]] | None) -> list[tuple[float, float]]:
     """Normalize raw CLOB levels ``[{"price","size"}, ...]`` (string fields) into
     a price-ascending list of ``(price, size)`` floats. Drops malformed /
