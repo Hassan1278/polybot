@@ -1,14 +1,13 @@
 """weather_forecast_probe.py — STEP 2b-2 PROBE.
 
-Before building the margin-of-failure grader, confirm Open-Meteo's archived-forecast API
-shape on a few city-days whose ACTUAL high we already pinned from gamma. Critically:
-does it give us the forecast as it stood ~24h/48h BEFORE the date (the `_previous_dayN`
-lead-time variables), per model — not a hindsight analysis? We dump the raw `daily`
-dict for the first city so we can see exactly what keys come back.
+Confirm Open-Meteo's Previous Runs API gives us honest lead-time forecasts before
+building the margin-of-failure grader. The Previous Runs API has NO daily aggregates,
+so we pull the HOURLY lead-time series — temperature_2m_previous_day1 (forecast issued
+~24h before valid time) and _previous_day2 (~48h before), per model — and compute the
+daily MAX ourselves over the target day's hours. That daily max is the lead-time
+forecast of the day's high, which we compare to the actual high pinned from gamma.
 
-Resolution stations (from the gamma descriptions in step 1), all °C cities, June 21:
-  London City (EGLC) · Paris-Le Bourget (LFPB) · Madrid-Barajas (LEMD) · Munich (EDDM)
-
+Resolution stations (from the gamma descriptions in step 1), all °C cities, June 21.
 Run on the VPS:
     docker compose exec -T executor python -m scripts.weather_forecast_probe
 """
@@ -17,12 +16,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 
 _OM = "https://previous-runs-api.open-meteo.com/v1/forecast"
-_DAILY = ["temperature_2m_max", "temperature_2m_max_previous_day1",
-          "temperature_2m_max_previous_day2", "temperature_2m_max_previous_day3"]
+_HOURLY = ["temperature_2m", "temperature_2m_previous_day1", "temperature_2m_previous_day2"]
 _MODELS = ["ecmwf_ifs04", "gfs_seamless", "icon_seamless"]
 
 # (city, station, lat, lon, date, actual_high_°C from gamma ground truth)
@@ -34,6 +31,12 @@ _PROBE = [
 ]
 
 
+def _daily_max(values):
+    """Daily max over an hourly series, ignoring nulls; None if all null."""
+    nums = [v for v in (values or []) if isinstance(v, (int, float))]
+    return max(nums) if nums else None
+
+
 async def run():
     import httpx
     async with httpx.AsyncClient(timeout=30) as c:
@@ -41,36 +44,36 @@ async def run():
             params = {
                 "latitude": lat, "longitude": lon,
                 "start_date": date, "end_date": date,
-                "daily": _DAILY, "models": _MODELS, "timezone": "auto",
+                "hourly": _HOURLY, "models": _MODELS, "timezone": "auto",
             }
             try:
                 r = await c.get(_OM, params=params)
                 if r.status_code != 200:
-                    print(f"{city}: HTTP {r.status_code} — {r.text[:200]}")
+                    print(f"{city}: HTTP {r.status_code} — {r.text[:220]}")
                     continue
                 d = r.json()
             except Exception as e:  # noqa: BLE001
                 print(f"{city}: request failed: {type(e).__name__}: {e}")
                 continue
-            daily = d.get("daily", {})
+            hourly = d.get("hourly", {})
             if i == 0:
-                print(f"RAW daily keys ({city}): {list(daily.keys())}")
-                print(json.dumps(daily, indent=2)[:1400])
-            print(f"\n{city} {date} @ {stn} — ACTUAL high {actual}°C")
-            for k, v in daily.items():
+                print(f"RAW hourly keys ({city}): {list(hourly.keys())}")
+            print(f"\n{city} {date} @ {stn} — ACTUAL high {actual}°C  "
+                  f"(daily max of each lead-time hourly series):")
+            for k in sorted(hourly):
                 if k == "time":
                     continue
-                val = v[0] if isinstance(v, list) and v else v
-                tag = ""
-                if isinstance(val, (int, float)):
-                    tag = f"  (Δ vs actual {val - actual:+.1f}°C)"
-                print(f"   {k:<46} {val}{tag}")
+                dmax = _daily_max(hourly[k])
+                if dmax is None:
+                    print(f"   {k:<48} (no data)")
+                else:
+                    print(f"   {k:<48} {dmax:6.1f}  (Δ vs actual {dmax - actual:+.1f}°C)")
 
 
 def main():
     for _n in ("httpx", "httpcore"):
         logging.getLogger(_n).setLevel(logging.WARNING)
-    argparse.ArgumentParser(description="Step 2b-2 probe: confirm Open-Meteo archived-forecast shape").parse_args()
+    argparse.ArgumentParser(description="Step 2b-2 probe: Open-Meteo Previous Runs lead-time forecasts").parse_args()
     asyncio.run(run())
 
 
