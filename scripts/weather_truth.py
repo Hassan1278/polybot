@@ -1,13 +1,15 @@
 """weather_truth.py — STEP 2b-1: reconstruct the ACTUAL resolved highs, independent
-of our (corrupt) DB.
+of the corrupt fills.
 
-Pulls resolved temperature markets straight from gamma, reassembles each city-day
-"ladder" of buckets, and finds the one bucket that resolved YES — that bucket IS where
-the day's high landed (to ~1°C / 1–2°F). The output is the clean ground-truth dataset
-the forecast-grading step (2b-2) will measure against. No forecasts, no DB fills.
+Enumerate weather markets from the gamma-sourced market CATALOG (the `markets` table —
+gamma metadata, NOT the corrupt `fills`), resolve each one LIVE via gamma
+`market_by_condition_id`, reassemble each city-day "ladder" of buckets, and find the
+one bucket that resolved YES — that bucket IS where the day's high landed (to ~1°C /
+1–2°F). The output is the clean ground-truth dataset the forecast-grading step (2b-2)
+measures against. No forecasts, no fills.
 
 Run on the VPS:
-    docker compose exec -T executor python -m scripts.weather_truth --days 14
+    docker compose exec -T executor python -m scripts.weather_truth
 """
 
 from __future__ import annotations
@@ -66,39 +68,39 @@ def _yes_won(m):
         return None
 
 
-async def run(*, days, cap_pages):
-    from datetime import datetime, timedelta, timezone
-
+async def run(*, cap):
     from polybot.clients import GammaClient
-    now = datetime.now(tz=timezone.utc)
+    from polybot.db import session_scope
+    from polybot.models import Market
+    from sqlalchemy import select
+
+    # enumerate from the gamma-sourced catalog (NOT fills)
+    async with session_scope() as s:
+        rows = (await s.execute(
+            select(Market.market_id, Market.question)
+            .where(Market.question.op("~*")(r"temperature"))
+        )).all()
+    cat = [(r.market_id, r.question) for r in rows if is_weather(r.question)]
+    if cap:
+        cat = cat[:cap]
+    print(f"catalog weather markets: {len(cat)} — resolving live via gamma (~1-2 min)…")
+
     g = GammaClient()
-    raw = []
+    legs, unresolved = [], 0
     try:
-        for page in range(cap_pages):
-            mk = await g.get("/markets", params={
-                "closed": "true", "limit": 500, "offset": page * 500,
-                "end_date_min": (now - timedelta(days=days)).isoformat(),
-                "end_date_max": now.isoformat(),
-                "order": "endDate", "ascending": "false",
-            }) or []
-            if not mk:
-                break
-            raw.extend(mk)
-            if len(mk) < 500:
-                break
+        for mid, q in cat:
+            m = await g.market_by_condition_id(mid)
+            kind, city, bucket, date = parse_q(q)
+            pb = parse_bucket(bucket) if bucket else None
+            yw = _yes_won(m)
+            if yw is None:
+                unresolved += 1
+            if not (city and date and pb is not None and yw is not None):
+                continue
+            legs.append({"city": city, "date": date, "kind": kind, "bucket": bucket,
+                         "parsed": pb, "yes": yw})
     finally:
         await g.close()
-
-    temp = [m for m in raw if is_weather(m.get("question", ""))]
-    legs = []
-    for m in temp:
-        kind, city, bucket, date = parse_q(m.get("question", ""))
-        pb = parse_bucket(bucket) if bucket else None
-        yw = _yes_won(m)
-        if not (city and date and pb is not None and yw is not None):
-            continue
-        legs.append({"city": city, "date": date, "kind": kind, "bucket": bucket,
-                     "parsed": pb, "yes": yw})
 
     groups = defaultdict(list)
     for x in legs:
@@ -110,21 +112,24 @@ async def run(*, days, cap_pages):
         rec = {"key": key, "legs": gl, "yes": yes, "n_buckets": len(gl)}
         (clean if status == "clean" else none_ if status == "none" else multi).append(rec)
 
-    print(f"\npulled {len(raw)} closed markets (last {days}d) → {len(temp)} temperature, "
-          f"{len(legs)} resolved buckets → {len(groups)} city-day ladders")
+    print(f"resolved buckets: {len(legs)}  (still-open/unresolved: {unresolved})  "
+          f"→ {len(groups)} city-day ladders")
     print(f"GROUND TRUTH usable (exactly one YES bucket): {len(clean)}   "
           f"unclear: none-yes={len(none_)} multi-yes={len(multi)} "
-          f"(incomplete ladders / boundary buckets)")
+          f"(partial ladders / boundary buckets)")
 
     print("\nACTUAL HIGHS (city-day → winning bucket = where the high landed):")
     for rec in sorted(clean, key=lambda r: (r["key"][1], r["key"][0])):
         city, date, kind = rec["key"]
         y = rec["yes"][0]
         print(f"  {date:>7} {city:<16} {kind:<7} high = {y['bucket']:<18} "
-              f"(ladder of {rec['n_buckets']} buckets)")
+              f"(ladder of {rec['n_buckets']} buckets we have)")
 
+    if none_:
+        print(f"\nnote: {len(none_)} city-days had NO yes-bucket in our catalog — the high "
+              "landed in a bucket we didn't ingest (need the full event ladder for those).")
     if multi:
-        print(f"\n⚠ {len(multi)} ladders with >1 YES (boundary/overlap — inspect a few):")
+        print(f"⚠ {len(multi)} ladders with >1 YES (boundary/overlap — inspect):")
         for rec in multi[:5]:
             city, date, kind = rec["key"]
             print(f"  {date} {city} {kind}: YES = {', '.join(y['bucket'] for y in rec['yes'])}")
@@ -133,11 +138,10 @@ async def run(*, days, cap_pages):
 def main():
     for _n in ("httpx", "httpcore"):
         logging.getLogger(_n).setLevel(logging.WARNING)
-    ap = argparse.ArgumentParser(description="Step 2b-1: reconstruct actual resolved highs from gamma")
-    ap.add_argument("--days", type=int, default=14, help="lookback window of resolved markets")
-    ap.add_argument("--cap-pages", type=int, default=20, help="max gamma pages (500/page)")
+    ap = argparse.ArgumentParser(description="Step 2b-1: reconstruct actual resolved highs (catalog + gamma)")
+    ap.add_argument("--cap", type=int, default=0, help="limit markets resolved (0 = all)")
     args = ap.parse_args()
-    asyncio.run(run(days=args.days, cap_pages=args.cap_pages))
+    asyncio.run(run(cap=args.cap))
 
 
 if __name__ == "__main__":
