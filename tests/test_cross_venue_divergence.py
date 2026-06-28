@@ -10,6 +10,8 @@ import math
 
 from scripts.cross_venue_divergence import (
     _duration_seconds,
+    best_bid_ask,
+    cross_edge,
     divergence_summary,
     logit,
     relative_divergence,
@@ -77,3 +79,46 @@ def test_summary_flags_symmetric_noise():
 
 def test_summary_empty():
     assert divergence_summary([])["n"] == 0
+
+
+# ── best_bid_ask: real book parsing (the fix for the seed-price artifact) ─────
+
+def test_best_bid_ask_picks_extremes_and_coerces_str():
+    # Limitless floats vs Polymarket CLOB string prices — both supported.
+    bids = [{"price": 0.25, "size": 1}, {"price": 0.21, "size": 1}, {"price": 0.011, "size": 1}]
+    asks = [{"price": "0.48", "size": 1}, {"price": "0.9", "size": 1}]
+    assert best_bid_ask(bids, asks) == (0.25, 0.48)        # highest bid, lowest ask
+
+
+def test_best_bid_ask_handles_empty_and_malformed():
+    assert best_bid_ask([], []) == (None, None)            # untraded one-sided book -> skip
+    assert best_bid_ask([{"price": 0.3, "size": 1}], None) == (0.3, None)
+    assert best_bid_ask([{"size": 1}], [{"price": "x"}]) == (None, None)  # malformed dropped
+
+
+# ── cross_edge: the executable lock metric ───────────────────────────────────
+
+def test_cross_edge_no_lock_when_books_dont_cross():
+    # the real BTC example: LIM 0.25/0.48 around POLY 0.30/0.32 -> neither side crosses.
+    ce = cross_edge(lim_bid=0.25, lim_ask=0.48, poly_bid=0.30, poly_ask=0.32)
+    assert ce["edge"] < 0                                  # no arb
+    # best of (poly_bid−lim_ask=-0.18, lim_bid−poly_ask=-0.07) = -0.07
+    assert abs(ce["edge"] - (-0.07)) < 1e-9
+
+
+def test_cross_edge_locks_when_one_bid_tops_other_ask():
+    # POLY will buy Up at 0.55 while LIM sells Up at 0.45 -> buy@LIM, hedge@POLY.
+    ce = cross_edge(lim_bid=0.40, lim_ask=0.45, poly_bid=0.55, poly_ask=0.60)
+    assert abs(ce["edge"] - 0.10) < 1e-9                   # 0.55 − 0.45
+    assert ce["direction"] == "Up@LIM/Down@POLY"
+
+
+def test_cross_edge_reverse_direction():
+    ce = cross_edge(lim_bid=0.60, lim_ask=0.65, poly_bid=0.40, poly_ask=0.45)
+    assert abs(ce["edge"] - 0.15) < 1e-9                   # lim_bid 0.60 − poly_ask 0.45
+    assert ce["direction"] == "Up@POLY/Down@LIM"
+
+
+def test_cross_edge_guards_missing_quote():
+    assert cross_edge(None, 0.5, 0.5, 0.5) is None
+    assert cross_edge(0.5, 0.5, 0.5, None) is None
