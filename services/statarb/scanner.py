@@ -273,14 +273,18 @@ async def scan_field(
     the outcomes are mutually-exclusive-and-exhaustive (exactly one YES wins)."""
     events = await gamma.events(limit=event_limit, active=True)
     found: list[ScanHit] = []
+    n_negrisk = n_thin = n_incomplete = 0
+    sums: list[tuple[float, str]] = []      # (Σ best YES asks, event) per fully-priced negRisk event
 
     for ev in events or []:
         if not ev.get("negRisk"):
             continue                                   # MECE not guaranteed -> never field-arb
+        n_negrisk += 1
         mkts = [m for m in (ev.get("markets") or []) if not m.get("closed")]
         legs = [(m, _yes_token_of(m)) for m in mkts]
         legs = [(m, t) for m, t in legs if t]
         if len(legs) < 2:
+            n_thin += 1                                # <2 priceable outcomes -> no field to buy
             continue
 
         by_token = await _fetch_book_index(clob, [t for _, t in legs], cfg)
@@ -295,7 +299,13 @@ async def scan_field(
             labels.append(str(m.get("groupItemTitle") or m.get("question") or tok)[:48])
             token_ids.append(tok)
         if not ok:
-            continue                                   # a missing leg breaks the guarantee
+            n_incomplete += 1                          # a missing leg breaks the $1 guarantee
+            continue
+
+        # field near-miss: Σ best ask across outcomes (top-of-book buy-the-field cost)
+        bests = [best_ask(a) for a in outcome_asks]
+        if all(b is not None for b in bests):
+            sums.append((sum(bests), str(ev.get("slug") or ev.get("title") or ev.get("id") or "")))
 
         opp = field_buy_arb(
             outcome_asks,
@@ -311,6 +321,20 @@ async def scan_field(
                 opp=opp, market_id=str(ev.get("id") or ""),
                 slug=str(ev.get("slug") or ""), question=str(ev.get("title") or ""),
             ))
+
+    # The funnel: total events -> negRisk -> (dropped: thin / incomplete) -> evaluable -> opps.
+    # If `evaluable` is tiny, a 0 here is underpowered, not a verdict.
+    log.info("statarb_field_universe", events=len(events or []), negrisk=n_negrisk,
+             thin=n_thin, incomplete=n_incomplete, evaluable=len(sums), opportunities=len(found))
+    if sums:
+        sums.sort(key=lambda x: x[0])
+        min_sum, min_event = sums[0]
+        log.info("statarb_field_near_miss", evaluable=len(sums), min_sum=round(min_sum, 4),
+                 min_event=min_event[:48],
+                 lt_1_00=sum(1 for s, _ in sums if s < 1.00),
+                 lt_1_01=sum(1 for s, _ in sums if s < 1.01),
+                 lt_1_02=sum(1 for s, _ in sums if s < 1.02),
+                 lt_1_05=sum(1 for s, _ in sums if s < 1.05))
     return found
 
 
