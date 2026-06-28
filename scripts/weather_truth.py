@@ -100,15 +100,7 @@ async def reconstruct(*, days, cap, conc):
     g = GammaClient()
     sem = asyncio.Semaphore(conc)
 
-    async def resolve(mid):
-        async with sem:
-            try:
-                out = await g.get("/markets", params={"condition_ids": mid, "closed": "true"})
-            except Exception:  # noqa: BLE001
-                return mid, None
-        m = out[0] if isinstance(out, list) and out else None
-        if not m:
-            return mid, None
+    def _info(m):
         toks = m.get("clobTokenIds")
         toks = json.loads(toks) if isinstance(toks, str) else toks
         end = m.get("endDate")
@@ -116,17 +108,37 @@ async def reconstruct(*, days, cap, conc):
             ets = int(datetime.fromisoformat(end.replace("Z", "+00:00")).timestamp()) if end else None
         except (ValueError, TypeError, AttributeError):
             ets = None
-        return mid, {"yw": _yes_won(m), "tok": str(toks[0]) if toks else None,
-                     "vol": float(m.get("volume") or 0), "end_ts": ets}
+        return {"yw": _yes_won(m), "tok": str(toks[0]) if toks else None,
+                "vol": float(m.get("volume") or 0), "end_ts": ets}
 
+    async def resolve_chunk(mids):
+        # batch ~20 condition_ids per gamma call — ~20x fewer requests, avoids the 429 storm
+        async with sem:
+            try:
+                out = await g.get("/markets", params={
+                    "condition_ids": ",".join(mids), "closed": "true", "limit": len(mids)})
+            except Exception:  # noqa: BLE001
+                return {}
+        part = {}
+        for m in out or []:
+            cid = m.get("conditionId") or m.get("condition_id")
+            if cid:
+                part[cid.lower()] = _info(m)
+        return part
+
+    ids = [mid for mid, _ in cat]
+    chunks = [ids[i:i + 20] for i in range(0, len(ids), 20)]
     try:
-        res = dict(await asyncio.gather(*[resolve(mid) for mid, _ in cat]))
+        parts = await asyncio.gather(*[resolve_chunk(c) for c in chunks])
     finally:
         await g.close()
+    res = {}
+    for part in parts:
+        res.update(part)
 
     legs, unresolved = [], 0
     for mid, q in cat:
-        info = res.get(mid)
+        info = res.get(mid.lower())
         yw = info["yw"] if info else None
         kind, city, bucket, date = parse_q(q)
         pb = parse_bucket(bucket) if bucket else None
