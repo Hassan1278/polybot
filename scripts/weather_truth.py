@@ -69,7 +69,10 @@ def _yes_won(m):
         return None
 
 
-async def run(*, days, cap, conc):
+async def reconstruct(*, days, cap, conc):
+    """DB-free ground truth: resolve recent weather markets via gamma and reassemble
+    ladders. Returns (clean, none_, multi) lists of ladder records; each record is
+    {key:(city,date,kind), legs, yes, n_buckets}. Reused by the forecast grader."""
     from datetime import datetime, timedelta, timezone
 
     from polybot.clients import GammaClient
@@ -138,6 +141,11 @@ async def run(*, days, cap, conc):
     print(f"GROUND TRUTH usable (exactly one YES bucket): {len(clean)}   "
           f"unclear: none-yes={len(none_)} multi-yes={len(multi)} "
           f"(partial ladders / boundary buckets)")
+    return clean, none_, multi
+
+
+async def run(*, days, cap, conc):
+    clean, none_, multi = await reconstruct(days=days, cap=cap, conc=conc)
 
     print("\nACTUAL HIGHS (city-day → winning bucket = where the high landed):")
     for rec in sorted(clean, key=lambda r: (r["key"][1], r["key"][0])):
