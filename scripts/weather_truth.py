@@ -107,7 +107,17 @@ async def reconstruct(*, days, cap, conc):
             except Exception:  # noqa: BLE001
                 return mid, None
         m = out[0] if isinstance(out, list) and out else None
-        return mid, _yes_won(m)
+        if not m:
+            return mid, None
+        toks = m.get("clobTokenIds")
+        toks = json.loads(toks) if isinstance(toks, str) else toks
+        end = m.get("endDate")
+        try:
+            ets = int(datetime.fromisoformat(end.replace("Z", "+00:00")).timestamp()) if end else None
+        except (ValueError, TypeError, AttributeError):
+            ets = None
+        return mid, {"yw": _yes_won(m), "tok": str(toks[0]) if toks else None,
+                     "vol": float(m.get("volume") or 0), "end_ts": ets}
 
     try:
         res = dict(await asyncio.gather(*[resolve(mid) for mid, _ in cat]))
@@ -116,7 +126,8 @@ async def reconstruct(*, days, cap, conc):
 
     legs, unresolved = [], 0
     for mid, q in cat:
-        yw = res.get(mid)
+        info = res.get(mid)
+        yw = info["yw"] if info else None
         kind, city, bucket, date = parse_q(q)
         pb = parse_bucket(bucket) if bucket else None
         if yw is None:
@@ -124,7 +135,8 @@ async def reconstruct(*, days, cap, conc):
         if not (city and date and pb is not None and yw is not None):
             continue
         legs.append({"city": city, "date": date, "kind": kind, "bucket": bucket,
-                     "parsed": pb, "yes": yw})
+                     "parsed": pb, "yes": yw, "mid": mid, "tok": info.get("tok"),
+                     "vol": info.get("vol"), "end_ts": info.get("end_ts")})
 
     groups = defaultdict(list)
     for x in legs:
