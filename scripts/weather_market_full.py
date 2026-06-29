@@ -259,8 +259,10 @@ async def run(*, days, cap, conc, chunk, bias, sigma, hours_before, haircut, rat
             print(f"    {name}: P&L {s['edge']:+.3f}/$1 {twose}  (win {s['hit']:.0%} @ avg "
                   f"price {s['price']:.3f}, n={s['n']})  -> {verdict}")
 
-        for hc in (0.0, 0.03):
-            print(f"  -- haircut {hc:.2f}/bet --")
+        # Polymarket has NO trading fee, so the only cost is the spread you cross:
+        # ~1-2c on a liquid favorite, 3c is a pessimistic wide-spread case.
+        for hc in (0.0, 0.01, 0.02, 0.03):
+            print(f"  -- haircut {hc:.2f}/bet (spread only; venue has no fee) --")
             fav_pnl("market favorite  ", lambda r: r["p_mkt"], hc)
             fav_pnl("forecast favorite", lambda r: r["p_fc"], hc)
 
