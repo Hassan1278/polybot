@@ -177,10 +177,24 @@ async def run(*, days, min_sibs, frac, fidelity, rate, haircuts):
         with open(_CACHE) as f:
             cache = json.load(f)
     rl, clob = _Rate(rate), ClobClient()
+    eta = (n_sib - len(cache)) / max(rate, 0.1)
+    print(f"  (~{eta / 60:.0f} min for the uncached siblings; progress every 100 events, "
+          f"cache checkpointed — safe to Ctrl-C and re-run to resume)", flush=True)
+
+    done = 0
+
+    def _flush():
+        with open(_CACHE, "w") as f:
+            json.dump(cache, f)
 
     async def do_event(eid, sibs):
+        nonlocal done
         priced = await asyncio.gather(*[_price_sib(clob, rl, cache, x, frac, fidelity) for x in sibs])
         priced = [p for p in priced if p]
+        done += 1
+        if done % 100 == 0:
+            _flush()                       # checkpoint so a kill/resume keeps its work
+            print(f"  …{done}/{len(events)} events priced ({len(cache)} cached)", flush=True)
         if len(priced) < 2:               # need a real choice among priced siblings
             return None
         fav = pick_favorite(priced)
@@ -191,8 +205,7 @@ async def run(*, days, min_sibs, frac, fidelity, rate, haircuts):
         results = await asyncio.gather(*[do_event(e, s) for e, s in events.items()])
     finally:
         await clob.close()
-        with open(_CACHE, "w") as f:
-            json.dump(cache, f)
+        _flush()
     favs = [r for r in results if r]
     print(f"priced {len(favs)}/{len(events)} events (>=2 siblings priced)\n")
     if not favs:
