@@ -70,6 +70,28 @@ def brier(rows, key):
     return sum(vals) / len(vals) if vals else None
 
 
+def argmax_accuracy(rows):
+    """The 'bet on the event most likely to win' test. rows: flat list of dicts with
+    keys lad (ladder id), p_fc, p_mkt, won. Group by ladder; for each ladder with >=2
+    priced buckets, check whether the highest-p_fc bucket and the highest-p_mkt bucket
+    are the one that actually won. Returns (forecast_pick_rate, market_pick_rate,
+    n_ladders) — apples-to-apples since both pick from the SAME priced buckets."""
+    from collections import defaultdict
+    by = defaultdict(list)
+    for r in rows:
+        by[r["lad"]].append(r)
+    fc = mk = n = 0
+    for rs in by.values():
+        if len(rs) < 2:
+            continue
+        n += 1
+        fc += max(rs, key=lambda r: r["p_fc"])["won"]
+        mk += max(rs, key=lambda r: r["p_mkt"])["won"]
+    if not n:
+        return (None, None, 0)
+    return (fc / n, mk / n, n)
+
+
 class _Rate:
     """Serializes request starts to at most `per_sec` per second (monotonic clock)."""
 
@@ -166,7 +188,8 @@ async def run(*, days, cap, conc, chunk, bias, sigma, hours_before, haircut, rat
         for label, pb, tok, is_yes in lad["buckets"]:
             p = await _price(clob, rl, cache, tok, tgt)
             rows.append({"label": label, "p_mkt": p, "won": 1.0 if is_yes else 0.0,
-                         "p_fc": gauss_bucket_prob(lad["mu"], sigma, pb), "vol": lad["vol"]})
+                         "p_fc": gauss_bucket_prob(lad["mu"], sigma, pb), "vol": lad["vol"],
+                         "lad": (lad["city"], lad["iso"])})
 
     try:
         await asyncio.gather(*[fill(lad) for lad in ladders])
@@ -179,35 +202,46 @@ async def run(*, days, cap, conc, chunk, bias, sigma, hours_before, haircut, rat
     both = [r for r in priced if r["p_fc"] is not None]
     print(f"\npriced {len(priced)}/{len(rows)} buckets ({len(both)} with a forecast prob)")
 
-    # --- calibration ---
+    # --- calibration: is the forecast distribution a better per-bucket predictor? ---
     bf, bm = brier(both, "p_fc"), brier(both, "p_mkt")
     print("\n===== CALIBRATION (Brier score, lower = better predictor) =====")
     if bf is not None and bm is not None:
         better = "FORECAST better" if bf < bm else "MARKET better"
         print(f"  forecast {bf:.4f}   vs   market {bm:.4f}   over n={len(both)}  -> {better}")
 
-    # --- edge: bet every bucket the forecast thinks is underpriced ---
+    # --- argmax accuracy: does the forecast's most-likely bucket win more than the market's? ---
+    fc_rate, mk_rate, n_lad = argmax_accuracy(both)
+    print("\n===== ARGMAX ACCURACY (the 'most likely to win' test, per ladder) =====")
+    if n_lad:
+        edge_str = ("FORECAST sharper" if fc_rate > mk_rate
+                    else "MARKET sharper" if mk_rate > fc_rate else "tie")
+        print(f"  forecast picks winner {fc_rate:.1%}   market picks winner {mk_rate:.1%}   "
+              f"over {n_lad} ladders  -> {edge_str}")
+
+    # --- edge: bet every bucket the forecast thinks is underpriced; sweep the cost ---
     bets = [r for r in both if (r["p_fc"] - r["p_mkt"]) > edge_min]
     vols = sorted(r["vol"] for r in bets)
     med = vols[len(vols) // 2] if vols else 0.0
 
-    def show_edge(name, rs):
-        s = summarize_edge([(r["won"], r["p_mkt"] + haircut) for r in rs])
+    def show_edge(name, rs, hc):
+        s = summarize_edge([(r["won"], r["p_mkt"] + hc) for r in rs])
         if not s.get("n"):
-            print(f"  {name}: (no bets)")
+            print(f"    {name}: (no bets)")
             return
         twose = f"±{2 * s['se']:.3f}" if s["se"] else ""
         verdict = ("EDGE" if s["se"] and s["edge"] - 2 * s["se"] > 0
                    else "NEGATIVE" if s["se"] and s["edge"] + 2 * s["se"] < 0
                    else "efficient/noise")
-        print(f"  {name}: edge {s['edge']:+.3f}/$1 {twose}  (hit {s['hit']:.0%} @ avg cost "
+        print(f"    {name}: edge {s['edge']:+.3f}/$1 {twose}  (hit {s['hit']:.0%} @ avg cost "
               f"{s['price']:.3f}, n={s['n']})  -> {verdict}")
 
-    print(f"\n===== EDGE — bet buckets where forecast prob > market by {edge_min} "
-          f"(haircut {haircut:.3f}/bet) =====")
-    show_edge("all       ", bets)
-    show_edge("low-volume", [r for r in bets if r["vol"] < med])
-    show_edge("high-volume", [r for r in bets if r["vol"] >= med])
+    print(f"\n===== EDGE — bet buckets where forecast prob > market by {edge_min}, "
+          f"swept over realistic costs =====")
+    for hc in sorted({0.0, 0.02, 0.03, 0.05, round(haircut, 3)}):
+        print(f"  -- haircut {hc:.3f}/bet (spread+fees) --")
+        show_edge("all        ", bets, hc)
+        show_edge("low-volume ", [r for r in bets if r["vol"] < med], hc)
+        show_edge("high-volume", [r for r in bets if r["vol"] >= med], hc)
 
 
 def main():
