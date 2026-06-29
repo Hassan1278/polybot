@@ -238,17 +238,39 @@ async def run(*, days, min_sibs, frac, fidelity, rate, haircuts):
 
     # both sides of the bias in one curve: YES-edge by price level, conditioned on being
     # a sibling WITHIN a multi-outcome event (the cut thread-2 never made).
-    all_samples = [s for r in favs for s in r["sibs"]]
-    print("\n===== WITHIN-EVENT CALIBRATION (YES-edge by price level, all siblings) =====")
-    print(f"  {'price':>11} {'n':>6} {'mean_px':>8} {'win_rate':>9} {'edge':>8} {'2se':>7}")
-    for r in calibration_table(all_samples, n_buckets=10):
-        if not r["n"]:
-            continue
-        sig = " *" if r["se"] and abs(r["edge"]) > 2 * r["se"] else ""
-        print(f"  {r['lo']:.1f}-{r['hi']:.1f}  {r['n']:>6} {r['mean_price']:>8.3f} "
-              f"{r['yes_rate']:>9.3f} {r['edge']:>+8.3f} {2 * r['se']:>7.3f}{sig}")
-    print("  edge>0 (dear end) = underpriced favorites -> BUY YES;  edge<0 (cheap end) = "
-          "overpriced longshots -> BUY NO;  '*' = |edge|>2se")
+    def _curve(label, samples):
+        print(f"\n===== WITHIN-EVENT CALIBRATION — {label} (n={len(samples)} siblings) =====")
+        print(f"  {'price':>11} {'n':>6} {'mean_px':>8} {'win_rate':>9} {'edge':>8} {'2se':>7}")
+        for r in calibration_table(samples, n_buckets=10):
+            if not r["n"]:
+                continue
+            sig = " *" if r["se"] and abs(r["edge"]) > 2 * r["se"] else ""
+            print(f"  {r['lo']:.1f}-{r['hi']:.1f}  {r['n']:>6} {r['mean_price']:>8.3f} "
+                  f"{r['yes_rate']:>9.3f} {r['edge']:>+8.3f} {2 * r['se']:>7.3f}{sig}")
+
+    by_cat_samples = defaultdict(list)
+    for r in favs:
+        for s in r["sibs"]:
+            by_cat_samples[r["category"] or "?"].append(s)
+    _curve("ALL categories", [s for r in favs for s in r["sibs"]])
+    if by_cat_samples.get("weather"):
+        _curve("WEATHER only", by_cat_samples["weather"])
+    print("  edge>0 (dear) = underpriced favorites -> BUY YES;  edge<0 (cheap) = overpriced "
+          "longshots -> BUY NO;  '*' = |edge|>2se")
+
+    # the exact thesis: weather FAVORITES grouped by their OWN price — does the 0.8-0.9
+    # band have a real edge, and how many events actually land there?
+    wx_favs = [r for r in favs if (r["category"] or "") == "weather"]
+    if wx_favs:
+        print(f"\n===== WEATHER FAVORITES by own price (n={len(wx_favs)}) — the 0.8-0.9 thesis =====")
+        print(f"  {'fav price':>11} {'n':>6} {'win_rate':>9} {'edge@0c':>8} {'2se':>7}")
+        for r in calibration_table([(r["price"], int(r["won"])) for r in wx_favs], n_buckets=10):
+            if not r["n"]:
+                continue
+            sig = " *" if r["se"] and abs(r["edge"]) > 2 * r["se"] else ""
+            print(f"  {r['lo']:.1f}-{r['hi']:.1f}  {r['n']:>6} {r['yes_rate']:>9.3f} "
+                  f"{r['edge']:>+8.3f} {2 * r['se']:>7.3f}{sig}")
+        print("  this is your strategy's payoff table: edge>0 with '*' and enough n = tradeable")
 
     print("\n===== by category (>=20 events) — haircut 0.01 =====")
     by_cat = defaultdict(list)
