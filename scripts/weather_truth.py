@@ -20,7 +20,7 @@ import asyncio
 import json
 import logging
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from scripts.weather_pnl import parse_q
 from scripts.weather_recon import is_weather
@@ -172,6 +172,19 @@ async def reconstruct(*, days, cap, conc):
 
 async def run(*, days, cap, conc):
     clean, none_, multi = await reconstruct(days=days, cap=cap, conc=conc)
+
+    # ladder completeness — full ladders or sparse fragments? This is the bias check for
+    # the money test: if most ladders are missing buckets, the clean (one-YES) subset is
+    # skewed toward city-days where we happen to hold the winning bucket.
+    sizes = sorted(r["n_buckets"] for r in (clean + none_ + multi))
+    if sizes:
+        hist = Counter(sizes)
+        med = sizes[len(sizes) // 2]
+        complete = sum(1 for n in sizes if n >= 6)
+        print("\nLADDER COMPLETENESS (buckets ingested per city-day, all ladders):")
+        print("  " + "  ".join(f"{n}b×{c}" for n, c in sorted(hist.items())))
+        print(f"  median {med} buckets/ladder, max {sizes[-1]}; "
+              f">=6 buckets (reasonably complete): {complete}/{len(sizes)} ladders")
 
     print("\nACTUAL HIGHS (city-day → winning bucket = where the high landed):")
     for rec in sorted(clean, key=lambda r: (r["key"][1], r["key"][0])):
