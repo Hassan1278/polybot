@@ -241,15 +241,18 @@ async def run(*, days, cap, conc, chunk, bias, sigma, hours_before, haircut, rat
     # --- PICK THE WINNER: just back the favorite bucket (no model-vs-market bet). The
     #     realized edge = win-rate − avg price; >0 means the favorite is *underpriced*
     #     (the classic multi-outcome longshot bias), which would be +EV with zero
-    #     forecasting skill — just reading the market's own prices. ---
-    groups = ladder_groups(both)
+    #     forecasting skill — just reading the market's own prices. The MARKET favorite
+    #     needs only prices, so run it over ALL priced ladders (not the forecast-gated
+    #     subset) — widening --days then adds n even where the forecast API has no data. ---
+    groups_mkt = ladder_groups(priced)   # market favorite: prices only
+    groups_fc = ladder_groups(both)      # forecast favorite: needs a forecast prob
     print("\n===== PICK THE WINNER — back the favorite bucket per ladder =====")
-    if groups:
-        cov = [topk_coverage(groups, lambda r: r["p_mkt"], k) for k in (1, 2, 3)]
+    if groups_mkt:
+        cov = [topk_coverage(groups_mkt, lambda r: r["p_mkt"], k) for k in (1, 2, 3)]
         print(f"  coverage (actual winner in market's top-k): top1 {cov[0]:.0%}  "
-              f"top2 {cov[1]:.0%}  top3 {cov[2]:.0%}  over {len(groups)} ladders")
+              f"top2 {cov[1]:.0%}  top3 {cov[2]:.0%}  over {len(groups_mkt)} ladders")
 
-        def fav_pnl(name, key, hc):
+        def fav_pnl(name, groups, key, hc):
             picks = [max(rs, key=key) for rs in groups]
             s = summarize_edge([(r["won"], r["p_mkt"] + hc) for r in picks])
             twose = f"±{2 * s['se']:.3f}" if s["se"] else ""
@@ -263,8 +266,8 @@ async def run(*, days, cap, conc, chunk, bias, sigma, hours_before, haircut, rat
         # ~1-2c on a liquid favorite, 3c is a pessimistic wide-spread case.
         for hc in (0.0, 0.01, 0.02, 0.03):
             print(f"  -- haircut {hc:.2f}/bet (spread only; venue has no fee) --")
-            fav_pnl("market favorite  ", lambda r: r["p_mkt"], hc)
-            fav_pnl("forecast favorite", lambda r: r["p_fc"], hc)
+            fav_pnl("market favorite  ", groups_mkt, lambda r: r["p_mkt"], hc)
+            fav_pnl("forecast favorite", groups_fc, lambda r: r["p_fc"], hc)
 
     # --- edge: bet every bucket the forecast thinks is underpriced; sweep the cost ---
     bets = [r for r in both if (r["p_fc"] - r["p_mkt"]) > edge_min]
