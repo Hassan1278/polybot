@@ -92,6 +92,26 @@ def argmax_accuracy(rows):
     return (fc / n, mk / n, n)
 
 
+def ladder_groups(rows, min_buckets=2):
+    """Group flat rows by their 'lad' key into per-ladder lists, keeping only ladders
+    with >= min_buckets priced buckets (so 'pick the favorite' is a real choice)."""
+    from collections import defaultdict
+    by = defaultdict(list)
+    for r in rows:
+        by[r["lad"]].append(r)
+    return [rs for rs in by.values() if len(rs) >= min_buckets]
+
+
+def topk_coverage(groups, key, k):
+    """Fraction of ladders whose actual winner is among the top-k buckets ranked by
+    `key` (e.g. lambda r: r['p_mkt']). None if there are no groups. This is the
+    'how often is the winner in my shortlist' coverage curve."""
+    if not groups:
+        return None
+    hit = sum(1 for rs in groups if any(r["won"] for r in sorted(rs, key=key, reverse=True)[:k]))
+    return hit / len(groups)
+
+
 class _Rate:
     """Serializes request starts to at most `per_sec` per second (monotonic clock)."""
 
@@ -217,6 +237,32 @@ async def run(*, days, cap, conc, chunk, bias, sigma, hours_before, haircut, rat
                     else "MARKET sharper" if mk_rate > fc_rate else "tie")
         print(f"  forecast picks winner {fc_rate:.1%}   market picks winner {mk_rate:.1%}   "
               f"over {n_lad} ladders  -> {edge_str}")
+
+    # --- PICK THE WINNER: just back the favorite bucket (no model-vs-market bet). The
+    #     realized edge = win-rate − avg price; >0 means the favorite is *underpriced*
+    #     (the classic multi-outcome longshot bias), which would be +EV with zero
+    #     forecasting skill — just reading the market's own prices. ---
+    groups = ladder_groups(both)
+    print("\n===== PICK THE WINNER — back the favorite bucket per ladder =====")
+    if groups:
+        cov = [topk_coverage(groups, lambda r: r["p_mkt"], k) for k in (1, 2, 3)]
+        print(f"  coverage (actual winner in market's top-k): top1 {cov[0]:.0%}  "
+              f"top2 {cov[1]:.0%}  top3 {cov[2]:.0%}  over {len(groups)} ladders")
+
+        def fav_pnl(name, key, hc):
+            picks = [max(rs, key=key) for rs in groups]
+            s = summarize_edge([(r["won"], r["p_mkt"] + hc) for r in picks])
+            twose = f"±{2 * s['se']:.3f}" if s["se"] else ""
+            verdict = ("+EV" if s["se"] and s["edge"] - 2 * s["se"] > 0
+                       else "NEGATIVE" if s["se"] and s["edge"] + 2 * s["se"] < 0
+                       else "breakeven/noise")
+            print(f"    {name}: P&L {s['edge']:+.3f}/$1 {twose}  (win {s['hit']:.0%} @ avg "
+                  f"price {s['price']:.3f}, n={s['n']})  -> {verdict}")
+
+        for hc in (0.0, 0.03):
+            print(f"  -- haircut {hc:.2f}/bet --")
+            fav_pnl("market favorite  ", lambda r: r["p_mkt"], hc)
+            fav_pnl("forecast favorite", lambda r: r["p_fc"], hc)
 
     # --- edge: bet every bucket the forecast thinks is underpriced; sweep the cost ---
     bets = [r for r in both if (r["p_fc"] - r["p_mkt"]) > edge_min]

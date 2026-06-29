@@ -3,7 +3,13 @@ The CLOB/gamma/Open-Meteo I/O is integration-level and runs on the VPS."""
 
 from __future__ import annotations
 
-from scripts.weather_market_full import argmax_accuracy, brier, gauss_bucket_prob
+from scripts.weather_market_full import (
+    argmax_accuracy,
+    brier,
+    gauss_bucket_prob,
+    ladder_groups,
+    topk_coverage,
+)
 from scripts.weather_truth import parse_bucket
 
 
@@ -49,3 +55,26 @@ def test_argmax_accuracy():
     fc, mk, n = argmax_accuracy(rows)
     assert n == 2 and fc == 1.0 and mk == 0.5
     assert argmax_accuracy([]) == (None, None, 0)
+
+
+def test_ladder_groups_filters_singletons():
+    rows = [
+        {"lad": "A", "won": 1.0}, {"lad": "A", "won": 0.0},
+        {"lad": "B", "won": 1.0},  # singleton -> dropped (no real choice)
+    ]
+    g = ladder_groups(rows)
+    assert len(g) == 1 and len(g[0]) == 2
+
+
+def test_topk_coverage():
+    # one ladder; winner (28) is the 2nd-highest market prob -> not in top1, in top2/3
+    rows = [
+        {"lad": "A", "p_mkt": 0.5, "won": 0.0},
+        {"lad": "A", "p_mkt": 0.4, "won": 1.0},
+        {"lad": "A", "p_mkt": 0.1, "won": 0.0},
+    ]
+    g = ladder_groups(rows)
+    assert topk_coverage(g, lambda r: r["p_mkt"], 1) == 0.0
+    assert topk_coverage(g, lambda r: r["p_mkt"], 2) == 1.0
+    assert topk_coverage(g, lambda r: r["p_mkt"], 3) == 1.0
+    assert topk_coverage([], lambda r: r["p_mkt"], 1) is None
