@@ -9,6 +9,7 @@ from scripts.weather_paper import (
     mid_of,
     no_pnl,
     rank_by_mid,
+    simulate_portfolio,
     yes_pnl,
 )
 
@@ -69,3 +70,14 @@ def test_agg():
     assert s["n"] == 4 and abs(s["mean"]) < 1e-9 and s["se"] > 0
     assert agg([]) == {"n": 0}
     assert agg([0.5])["se"] is None      # n=1, no se
+
+
+def test_simulate_portfolio():
+    # $10 @ 0.50 wins (20 shares -> $20, +$10); $10 @ 0.40 loses (-$10) -> net 0
+    port = simulate_portfolio([(0.50, True), (0.40, False)], 2000, 10)
+    assert port["n"] == 2 and abs(port["staked"] - 20) < 1e-9
+    assert abs(port["pnl"]) < 1e-9 and abs(port["final_equity"] - 2000) < 1e-9
+    # a clean winner at 0.40: 25 shares -> $25 on $10 staked, +$15, ROI +150%
+    win = simulate_portfolio([(0.40, True)], 2000, 10)
+    assert abs(win["pnl"] - 15) < 1e-9 and abs(win["roi"] - 1.5) < 1e-9
+    assert simulate_portfolio([(None, True), (0.0, True)], 100, 5)["n"] == 0  # skips bad asks

@@ -8,9 +8,11 @@ longshots" are all post-hoc cuts on the same captured data. No strategy is commi
 front; we just record reality and slice it.
 
 Workflow (run on the VPS; the store persists between calls):
-    # capture today's open ladders — run a few times a day, or cron hourly:
+    # capture EVERY open ladder's real book — cron every 15 min to trace the price path:
+    #   */15 * * * * cd ~/polybot && docker compose exec -T executor \
+    #       python -m scripts.weather_paper snap >> ~/wpaper.log 2>&1
     docker compose exec -T executor python -m scripts.weather_paper snap
-    # settle anything that resolved + print the running scorecard:
+    # settle + scorecard + $2000 paper book (favorite-YES, tiny sizing, full breadth):
     docker compose exec -T executor python -m scripts.weather_paper report
 
 NB: the store defaults to /tmp/weather_paper.json — fine while the container stays up;
@@ -111,6 +113,24 @@ def agg(pnls):
     var = sum((x - mean) ** 2 for x in xs) / (n - 1) if n > 1 else 0.0
     se = math.sqrt(var / n) if n > 1 else None
     return {"n": n, "mean": mean, "se": se}
+
+
+def simulate_portfolio(bets, bankroll, bet_size):
+    """Realistic paper book. bets: list of (ask, won) for the favorite entries. Each bet
+    buys bet_size$ of YES at the real ask -> bet_size/ask shares, each worth $1 iff it won.
+    Sizing is tiny vs bankroll (full breadth, hundreds of small bets), so no binding
+    constraint is modeled — we roll up realized P&L, ROI on staked, and final equity."""
+    staked = pnl = 0.0
+    n = 0
+    for ask, won in bets:
+        if ask is None or ask <= 0:
+            continue
+        shares = bet_size / ask
+        pnl += (shares if won else 0.0) - bet_size
+        staked += bet_size
+        n += 1
+    return {"n": n, "staked": staked, "pnl": pnl,
+            "roi": (pnl / staked) if staked else None, "final_equity": bankroll + pnl}
 
 
 # ── store ──────────────────────────────────────────────────────────────────
@@ -242,7 +262,7 @@ async def _settle(store, conc):
     return settled
 
 
-async def report(store_path, conc, lead_hours, spread_tier):
+async def report(store_path, conc, lead_hours, spread_tier, bankroll, bet_size):
     store = _load(store_path)
     settled = await _settle(store, conc)
     _save(store_path, store)
@@ -262,6 +282,7 @@ async def report(store_path, conc, lead_hours, spread_tier):
 
     rows = defaultdict(list)            # strategy -> [pnl]
     liq = defaultdict(lambda: defaultdict(list))   # tier -> strategy -> [pnl]
+    port_bets = []                       # (entry_ts, ask, won) for the bankroll sim
     n85 = 0
     for _key, snaps in by_key.items():
         winner = snaps[0]["winner"]
@@ -277,6 +298,8 @@ async def report(store_path, conc, lead_hours, spread_tier):
             if "fav_yes" in ev85:
                 rows["fav_yes_85c_trigger"].append(ev85["fav_yes"])
         fav = rank_by_mid(at_lead["buckets"])
+        if fav and fav[0]["ask"] is not None:
+            port_bets.append((at_lead["snap_ts"], fav[0]["ask"], fav[0]["label"] == winner))
         tier = "liquid (spread<=3c)" if (fav and fav[0]["ask"] is not None
                and fav[0]["bid"] is not None and (fav[0]["ask"] - fav[0]["bid"]) <= spread_tier) \
                else "illiquid (spread>3c)"
@@ -301,6 +324,27 @@ async def report(store_path, conc, lead_hours, spread_tier):
     print("\n  favorite-YES by liquidity (real spread at entry):")
     for tier in ("liquid (spread<=3c)", "illiquid (spread>3c)"):
         line(tier, liq[tier]["fav_yes"])
+
+    # how the favorite edge evolves as you enter closer to resolution (the "important hours")
+    print("\n  favorite-YES by ENTRY lead (does entering later — sharper price — help?):")
+    for lead in (24, 12, 6, 3, 1):
+        pnls = []
+        for _key, snaps in by_key.items():
+            near = min(snaps, key=lambda s: abs(s["hrs_to_end"] - lead))
+            if abs(near["hrs_to_end"] - lead) <= max(0.5 * lead, 1.5):
+                ev = evaluate_ladder(near["buckets"], snaps[0]["winner"])
+                if "fav_yes" in ev:
+                    pnls.append(ev["fav_yes"])
+        line(f"entry @{lead:>2}h ", pnls)
+
+    # the actual $ book: favorite-YES, tiny size, full breadth
+    port_bets.sort(key=lambda b: b[0])
+    port = simulate_portfolio([(a, w) for _ts, a, w in port_bets], bankroll, bet_size)
+    print(f"\n===== PAPER PORTFOLIO — favorite-YES, ${bet_size:.0f}/bet, ${bankroll:.0f} bankroll, "
+          f"entry≈{lead_hours:.0f}h =====")
+    if port["n"]:
+        print(f"  bets {port['n']}  staked ${port['staked']:.0f}  realized P&L "
+              f"${port['pnl']:+.2f}  ROI {port['roi']:+.1%}  ->  equity ${port['final_equity']:.2f}")
     print("\n  +EV needs mean-2se>0; expect a week to show SPREADS+mechanics, not significance.")
 
 
@@ -313,12 +357,15 @@ def main():
     ap.add_argument("--within-hours", type=int, default=36, help="snap ladders resolving within N hours")
     ap.add_argument("--lead-hours", type=float, default=24.0, help="score at the snapshot nearest this lead")
     ap.add_argument("--spread-tier", type=float, default=0.03, help="liquid/illiquid split on favorite spread")
+    ap.add_argument("--bankroll", type=float, default=2000.0, help="paper bankroll for the portfolio sim")
+    ap.add_argument("--bet-size", type=float, default=5.0, help="$ staked per favorite bet (tiny vs bankroll)")
     ap.add_argument("--conc", type=int, default=8, help="concurrent CLOB/gamma calls")
     args = ap.parse_args()
     if args.mode == "snap":
         asyncio.run(snap(args.store, args.within_hours, args.conc))
     else:
-        asyncio.run(report(args.store, args.conc, args.lead_hours, args.spread_tier))
+        asyncio.run(report(args.store, args.conc, args.lead_hours, args.spread_tier,
+                           args.bankroll, args.bet_size))
 
 
 if __name__ == "__main__":
