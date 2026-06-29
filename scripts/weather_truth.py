@@ -112,11 +112,13 @@ async def reconstruct(*, days, cap, conc):
                 "vol": float(m.get("volume") or 0), "end_ts": ets}
 
     async def resolve_chunk(mids):
-        # batch ~20 condition_ids per gamma call — ~20x fewer requests, avoids the 429 storm
+        # batch ~20 condition_ids per gamma call — ~20x fewer requests, avoids the 429 storm.
+        # gamma's `condition_ids` is a REPEATED param, so pass the list (httpx emits
+        # condition_ids=a&condition_ids=b…); a CSV join is read as one bad id → 0 matches.
         async with sem:
             try:
                 out = await g.get("/markets", params={
-                    "condition_ids": ",".join(mids), "closed": "true", "limit": len(mids)})
+                    "condition_ids": list(mids), "closed": "true", "limit": len(mids)})
             except Exception:  # noqa: BLE001
                 return {}
         part = {}
