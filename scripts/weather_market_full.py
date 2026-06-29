@@ -97,11 +97,10 @@ async def _price(clob, rate, cache, tok, target_ts):
     try:
         raw = await clob.price_history(tok, interval="max", fidelity=60)
     except Exception:  # noqa: BLE001
-        cache[key] = None
-        return None
+        return None  # transient (rate-limit/timeout) — DON'T cache, so a rerun retries it
     hist = raw.get("history", []) if isinstance(raw, dict) else (raw or [])
     p, _ts = _sample_at(hist, target_ts)
-    cache[key] = p
+    cache[key] = p  # a successful call (even with no datapoint) is a real, cacheable answer
     return p
 
 
