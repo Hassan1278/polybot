@@ -20,10 +20,14 @@ paper_starting_usdc`). All work is observe-only / paper unless noted.
 > - **Taking** liquidity → every cross we found is arbed flat (threads 1–7).
 > - **Making** liquidity → the spread you earn is *exact compensation* for adverse
 >   selection; the reward subsidy (~10% APR best case) does not cover the gap risk.
+> - **Predicting** with your own *public* external data → the market already aggregates
+>   the same forecasts *better* than a single model can (thread 9: on weather it
+>   out-predicts us 43% vs 32%). No accuracy edge ⇒ nothing to monetize.
 >
 > The only participants who profit have an edge the bot doesn't: **prediction**
-> (we proved the crypto windows are a coin flip), **speed** (HFT we don't have), or
-> **private information** (the "informed minority"). Everyone else is a gambler.
+> (we proved the crypto windows are a coin flip *and* that public weather models lose
+> to the market), **speed** (HFT we don't have), or **private information** (the
+> "informed minority"). Everyone else is a gambler.
 
 This is not a failure of effort — it is the measured, repeated answer. It matches the
 prior intuition that "the only profitable people on Polymarket are market makers, an
@@ -43,6 +47,7 @@ informed minority, or a gambler."
 | 6 | Orderbook-imbalance (OBI) signal | same research workflow | **HFT-only** — decays in seconds |
 | 7 | Cross-venue arb (Polymarket ↔ Limitless) | `scripts/cross_venue_divergence.py` | **Dead** — noise + non-crossing books + different oracle |
 | 8 | LP rewards / market-making | 2-agent program research | **Thin & conditional** — ~10% APR, wiped by adverse selection |
+| 9 | Weather temp ladders — external-data / own-model | `scripts/weather_{truth,grade,market_full}.py` + Open-Meteo | **Market is the better forecaster** — Brier 0.104 vs 0.089, argmax 32% vs 43%, edge <0 even at 0¢ |
 
 ---
 
@@ -251,11 +256,90 @@ real pricing or latency edge.
 
 ---
 
+### 9 — Weather temperature markets: external-data / own-model edge  → *market is the better forecaster*
+**The pivot.** Threads 1–8 hunted for mispricing the market itself reveals. This thread
+tested the operator's own framing: *don't out-trade the market, out-predict it* — "bet
+on the event most likely to win **regardless of price**" (beta, not alpha) — using
+**external data the crowd supposedly underuses**. Polymarket runs daily per-city
+temperature ladders (1°C / 2°F buckets; the day's high lands in exactly one bucket — a
+partition) that resolve on **Weather Underground** at a specific airport station
+(e.g. NYC=LaGuardia, Paris=Le Bourget, London=London City). Operator's thesis: find the
+**margin of failure** of the forecasts, and whether the WU resolution source diverges
+from reality enough to exploit — *not* to build a better model from scratch.
+
+**Method** (all DB-free — the bot's own `fills` table was corrupt, see note):
+1. **Ground truth** (`scripts/weather_truth.py`). Enumerate resolved weather markets
+   from the gamma catalog, batch-resolve via gamma `condition_ids` (a **repeated** query
+   param, 20/call — ~20× fewer requests, kills the 429 storm), reassemble each city-day
+   ladder, take the single YES bucket = where the high landed. **636 city-day ladders
+   over 14 days, median 7 buckets/ladder, winner present in 628/636 (only 1.3% missing)**
+   → the clean subset is unbiased. Physically validated: Paris 41°C / London 36°C on
+   Jun 24–26 = the real late-June 2025 European heatwave; Wellington/Buenos Aires/São
+   Paulo show Southern-Hemisphere winter highs.
+2. **Forecast grading** (`scripts/weather_grade.py`). Open-Meteo **Previous Runs API**
+   gives the forecast *as issued 24h/48h ahead* (hourly `temperature_2m_previous_day1/2`,
+   daily max derived — no daily aggregate exists on that endpoint). **ICON is the best
+   public model (~1.1°C MAE @ 24h)**; ERA5 reanalysis = "actual." **WU runs ~0.53°C
+   hotter than ERA5** — a real, idiosyncratic station bias (confirming the thesis).
+3. **Money test** (`scripts/weather_market_full.py`). Turn ICON's 24h forecast (+0.4°C
+   WU-hot correction) into a Gaussian (σ=1.4°C from the measured error) → a forecast
+   probability for **every bucket**. Price **every bucket** from CLOB price history at
+   24h before resolution (throttled 8/s + disk-cached so the ~3.5k-request run is
+   rate-limit-free and resumable). Compare forecast vs market three ways over **3,555
+   buckets / 465 ladders**.
+
+**Result — the market wins on every axis:**
+- **Calibration (Brier, lower = better):** forecast **0.1037** vs market **0.0894**
+  → the **market is the better per-bucket predictor** (~16% lower error).
+- **Argmax accuracy (the "most likely to win" test):** the forecast's top bucket won
+  **32.3%**; the market's top bucket won **43.4%** (n=465 ladders) → **the market picks
+  the winner far more often.** This kills the *beta* premise directly: our public-data
+  model is a *worse* forecaster than the crowd, before price even enters.
+- **Realized edge (bet buckets the forecast thinks are underpriced by >5pts):**
+  **negative even at zero cost** — all −0.013 ±0.016, low-volume **−0.024 ±0.021**
+  (worse), uniformly NEGATIVE once any spread/fee haircut applies. Hit rate 4–6% on cheap
+  (~6¢) longshots: the model systematically *overrates* far-from-mode buckets.
+
+**Why.** (1) The market already ingests the same public forecasts — and better ones:
+multi-model ensembles, and *nowcasts* closer to resolution that we, with no speed edge,
+can't race. (2) The WU station bias is **already priced** — we baked +0.4°C into the
+forecast and still lost. (3) There's a **physical ceiling**: 24h forecast error
+(~1.1°C) ⊕ WU idiosyncratic noise (~0.8°C) ≈ 1.36°C combined → the central 1°C bucket
+captures the high only ~30% of the time, matching our 32%. The market's 43% means it is
+using information beyond a single 24h public model. A retail operator cannot beat that
+with free model data.
+
+**The illiquid-tail hope, refuted.** The one place an edge could plausibly hide — thin,
+low-volume buckets — is where the forecast does **worst** (−0.024 vs −0.003 high-volume,
+at zero haircut). Those are far-tail longshots the model overrates, and the spread is
+widest exactly there.
+
+**Verdict.** Efficient — and more pointedly, **the market is a strictly better forecaster
+than our external-data model**, so the approach fails at the *accuracy* (beta) level
+before cost even enters. "Bring your own *public* data" does not beat a liquid prediction
+market that already aggregates it.
+
+**Data-integrity note.** The bot's `fills`/DB record for weather was **corrupt**
+(Data-API truth: 48 trades / \$15 BUY vs DB 447 / \$1158 BUY, and 29 phantom DB-only
+markets), so this whole thread was rebuilt from independent gamma/CLOB/Data-API +
+Open-Meteo. Treat the live `fills` table as unreliable for weather analysis.
+
+---
+
 ## Synthesis
 
 Seven taking-side threads are each efficient; the making side pays a spread that
-exactly compensates adverse selection. The unifying theorem (see TL;DR): **no
-information edge + no speed edge ⇒ no mechanical +EV strategy, taking or making.**
+exactly compensates adverse selection; and the "bring your own data" prediction side
+(thread 9) loses to the market's own aggregate forecast. The unifying theorem (see
+TL;DR): **no information edge + no speed edge ⇒ no mechanical +EV strategy — taking,
+making, or predicting.**
+
+Thread 9 sharpened the theorem in an important way. The operator's most promising-sounding
+idea was *beta, not alpha*: skip the market's price and just predict the outcome better,
+using external data the crowd "underuses." But a liquid prediction market **is** an
+aggregate forecast, and on weather it beat a calibrated single-model forecast outright
+(43% vs 32% at picking the winner). The lesson: **public** external data is already in
+the price. An accuracy edge requires data the market *doesn't* have.
 
 The **one** mechanical +EV thing still standing is a **reward-overlay quoter** on
 *calm, long-dated* Polymarket markets with **cancel-on-move** to dodge pick-offs — a
@@ -263,10 +347,11 @@ The **one** mechanical +EV thing still standing is a **reward-overlay quoter** o
 yield-farm, **not alpha**.
 
 Anything with a higher ceiling requires an **edge the bot doesn't have**: prediction
-(disproven for crypto), speed (HFT), or **private information** on specific markets —
-the last being the only one a non-speed retail operator can realistically supply, and
-only by stopping the hunt for a black-box and instead *amplifying their own topical
-knowledge* with breadth + calibration + disciplined sizing.
+(disproven for crypto windows *and* for public-data weather forecasting), speed (HFT),
+or **private information** on specific markets — the last being the only one a non-speed
+retail operator can realistically supply, and only by stopping the hunt for a black-box
+and instead *amplifying their own topical knowledge* with breadth + calibration +
+disciplined sizing.
 
 ---
 
@@ -315,3 +400,52 @@ real books; run on the VPS:
 (append `--loop --interval 30` for a rolling sample). Pure core is unit-tested; the
 venue I/O is integration-only (the dev sandbox blocks `api.limitless.exchange` at the
 egress proxy, so it must run where the bot runs).
+
+---
+
+## Appendix — reusable facts (weather thread 9)
+
+**Polymarket weather markets.** Per-city, per-day **temperature ladders**: 1°C (or 2°F)
+buckets, plus open-ended `"X°C or below"` / `"X°C or higher"` ends; the daily high lands
+in exactly one bucket (a partition, so YES-probabilities across a full ladder sum to 1).
+Two kinds per city-day: `highest` (daily high) and `lowest` (daily low) — we tested
+`highest`. Resolution source is mostly **Weather Underground** at a named airport station
+(NYC=LaGuardia, Paris=Le Bourget, London=London City; minority on Hong Kong Observatory /
+NOAA). Each bucket is its own gamma market with a `conditionId` and `clobTokenIds`.
+
+**Gamma batch resolution.** `/markets` takes `condition_ids` as a **repeated** query param
+(`condition_ids=a&condition_ids=b&…`), *not* a CSV — pass a Python **list** so httpx emits
+repeated keys (a `",".join(...)` is read as one malformed id → 0 matches). ~20 ids/call
+keeps the URL safe and cuts requests ~20×. Add `closed=true` to surface settled markets
+(gamma's default `closed=false` hides them). `outcomePrices`/`clobTokenIds` come back as
+JSON strings; YES = index 0; a market is resolved when `closed=true` and `outcomePrices[0]
+> 0.5` ⇒ YES won.
+
+**Open-Meteo — forecast *as it was issued*.** **Previous Runs API**
+(`https://previous-runs-api.open-meteo.com/v1/forecast`): hourly
+`temperature_2m_previous_day1` / `_previous_day2` = the run issued 24h / 48h ahead. **No
+daily aggregate exists on that endpoint** — request hourly and derive the daily max
+yourself. Models: `icon_seamless` (best, ~1.1°C MAE @ 24h), `gfs_seamless`,
+`ecmwf_ifs025` (note `ecmwf_ifs04` returns no data). **Archive/ERA5** "actual"
+(`https://archive-api.open-meteo.com/v1/archive`, `daily=temperature_2m_max`) lags ~5
+days. **Multi-location batching:** comma-separated `latitude`/`longitude` returns a list
+(one object per location) — collapses N calls into a few; mind the per-call rate limit.
+
+**CLOB price history.** `clob.price_history(token, interval="max", fidelity=60)` returns
+`{"history":[{"t":unix,"p":price}]}` — a **dict**, not a bare list; unwrap
+`raw["history"]`. To price a bucket at "24h before resolution," sample the last point at
+or before `end_ts − 24*3600`.
+
+**Measured constants (Jun 2025, ~250–636 city-days).** ICON 24h MAE ≈ **1.1°C**; WU
+station reads ≈ **+0.53°C hotter than ERA5** (idiosyncratic, real); decompose WU =
+reality + ~0.53° systematic + ~0.8° noise ⇒ single 1°C-bucket precision is capped at
+~30% even with a perfect-mean forecast. Gaussian(μ=ICON+0.4, σ=1.4) is well-calibrated to
+this.
+
+**Scripts** (all branch `claude/happy-ramanujan-5z3lfo`, pure cores unit-tested; all I/O
+runs on the VPS because the dev sandbox blocks external APIs at the egress proxy):
+`weather_truth.py` (ground truth + ladder completeness), `weather_grade.py` (model MAE /
+bias / WU-vs-ERA5 fidelity), `weather_market_full.py` (the decisive money test — Brier
+calibration + argmax accuracy + cost-swept edge over every bucket). Run:
+`docker compose exec -T executor python -m scripts.weather_market_full --days 14 --rate 8`
+(first run ~5 min, cached + resumable).
