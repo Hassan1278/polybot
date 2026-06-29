@@ -35,6 +35,7 @@ from collections import defaultdict
 
 from scripts.calibration_backtest import (
     _history,
+    calibration_table,
     outcome_from_history,
     resolved_yes,
     sample_at_fraction,
@@ -199,7 +200,8 @@ async def run(*, days, min_sibs, frac, fidelity, rate, haircuts):
             return None
         fav = pick_favorite(priced)
         return {"won": float(fav["won"]), "price": fav["price"], "n_out": len(priced),
-                "category": fav["category"], "vol": max(p["vol"] for p in priced)}
+                "category": fav["category"], "vol": max(p["vol"] for p in priced),
+                "sibs": [(p["price"], int(p["won"])) for p in priced]}
 
     try:
         results = await asyncio.gather(*[do_event(e, s) for e, s in events.items()])
@@ -233,6 +235,20 @@ async def run(*, days, min_sibs, frac, fidelity, rate, haircuts):
     for b in ("2 (binary)", "3-4", "5-8", "9+"):
         if by_n.get(b):
             show(f"N={b:<10}", by_n[b], 0.01)
+
+    # both sides of the bias in one curve: YES-edge by price level, conditioned on being
+    # a sibling WITHIN a multi-outcome event (the cut thread-2 never made).
+    all_samples = [s for r in favs for s in r["sibs"]]
+    print("\n===== WITHIN-EVENT CALIBRATION (YES-edge by price level, all siblings) =====")
+    print(f"  {'price':>11} {'n':>6} {'mean_px':>8} {'win_rate':>9} {'edge':>8} {'2se':>7}")
+    for r in calibration_table(all_samples, n_buckets=10):
+        if not r["n"]:
+            continue
+        sig = " *" if r["se"] and abs(r["edge"]) > 2 * r["se"] else ""
+        print(f"  {r['lo']:.1f}-{r['hi']:.1f}  {r['n']:>6} {r['mean_price']:>8.3f} "
+              f"{r['yes_rate']:>9.3f} {r['edge']:>+8.3f} {2 * r['se']:>7.3f}{sig}")
+    print("  edge>0 (dear end) = underpriced favorites -> BUY YES;  edge<0 (cheap end) = "
+          "overpriced longshots -> BUY NO;  '*' = |edge|>2se")
 
     print("\n===== by category (>=20 events) — haircut 0.01 =====")
     by_cat = defaultdict(list)
