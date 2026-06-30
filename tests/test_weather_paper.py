@@ -5,7 +5,10 @@ from __future__ import annotations
 from scripts.weather_paper import (
     agg,
     best_bid_ask,
+    bet_pnl,
+    daily_series,
     evaluate_ladder,
+    max_drawdown,
     mid_of,
     no_pnl,
     open_position,
@@ -80,6 +83,25 @@ def test_agg():
     assert s["n"] == 4 and abs(s["mean"]) < 1e-9 and s["se"] > 0
     assert agg([]) == {"n": 0}
     assert agg([0.5])["se"] is None      # n=1, no se
+
+
+def test_bet_pnl():
+    assert abs(bet_pnl(0.5, True, 5) - 5.0) < 1e-9    # 10 shares -> $10, +$5
+    assert bet_pnl(0.5, False, 5) == -5.0             # loss capped at -stake
+    assert bet_pnl(0.25, True, 5) == 15.0             # 20 shares -> $20, +$15
+    assert bet_pnl(0.0, True, 5) is None and bet_pnl(None, True, 5) is None
+
+
+def test_daily_series_and_drawdown():
+    t0 = 1_700_000_000                                 # fixed ts (deterministic date)
+    bets = [(t0, 0.5, True), (t0 + 100, 0.5, False),   # same UTC day: +5, -5 -> 0
+            (t0 + 86400, 0.5, False)]                  # next day: -5
+    s = daily_series(bets, 5)
+    assert len(s) == 2
+    assert abs(s[0][1]) < 1e-9 and abs(s[1][1] + 5.0) < 1e-9
+    assert abs(max_drawdown([p for _d, p in s]) + 5.0) < 1e-9   # cum 0,-5 -> dd -5
+    assert max_drawdown([]) == 0.0
+    assert max_drawdown([3.0, 2.0]) == 0.0             # never below the start peak
 
 
 def test_open_position():

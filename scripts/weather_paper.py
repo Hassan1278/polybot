@@ -150,6 +150,36 @@ def open_position(entry_buckets, latest_buckets, bet_size):
             "shares": shares, "unreal": unreal}
 
 
+def bet_pnl(ask, won, size):
+    """$ P&L of one favorite-YES bet: stake `size` at the ask (size/ask shares), settle
+    $1/share if it won, else lose the whole stake. Loss is capped at −size (no fat
+    per-bet left tail). None if no ask."""
+    if not ask or ask <= 0:
+        return None
+    return (size / ask - size) if won else -float(size)
+
+
+def daily_series(bets, size):
+    """bets: [(end_ts, ask, won)]. Sum $ P&L by UTC resolution date.
+    Returns sorted [(yyyy-mm-dd, day_pnl)] — the per-day series."""
+    by = defaultdict(float)
+    for end_ts, ask, won in bets:
+        p = bet_pnl(ask, won, size)
+        if p is not None:
+            by[time.strftime("%Y-%m-%d", time.gmtime(end_ts))] += p
+    return sorted(by.items())
+
+
+def max_drawdown(daily_pnls):
+    """Largest peak-to-trough drop of the cumulative-P&L curve (<= 0). The streak risk."""
+    cum = peak = mdd = 0.0
+    for p in daily_pnls:
+        cum += p
+        peak = max(peak, cum)
+        mdd = min(mdd, cum - peak)
+    return mdd
+
+
 # ── store ──────────────────────────────────────────────────────────────────
 
 
@@ -335,6 +365,7 @@ async def report(store_path, conc, lead_hours, spread_tier, bankroll, bet_size, 
     liq = defaultdict(lambda: defaultdict(list))   # tier -> strategy -> [pnl]
     port_bets = []                       # (entry_ts, ask, won) for the bankroll sim
     fav_records = []                     # (entry_ask, won) per favorite — for price-floor cuts
+    day_bets = []                        # (end_ts, ask, won) per favorite — for the daily series
     n85 = 0
     for _key, snaps in by_key.items():
         winner = snaps[0]["winner"]
@@ -354,6 +385,7 @@ async def report(store_path, conc, lead_hours, spread_tier, bankroll, bet_size, 
             won_fav = fav[0]["label"] == winner
             port_bets.append((at_lead["snap_ts"], fav[0]["ask"], won_fav))
             fav_records.append((fav[0]["ask"], won_fav))
+            day_bets.append((snaps[0]["end_ts"], fav[0]["ask"], won_fav))
         tier = "liquid (spread<=3c)" if (fav and fav[0]["ask"] is not None
                and fav[0]["bid"] is not None and (fav[0]["ask"] - fav[0]["bid"]) <= spread_tier) \
                else "illiquid (spread>3c)"
@@ -415,6 +447,28 @@ async def report(store_path, conc, lead_hours, spread_tier, bankroll, bet_size, 
         twose = f"±{2 * s['se']:.3f}" if s["se"] else ""
         print(f"    fav>={floor:.2f}: edge {s['mean']:+.3f}/$1 {twose:<9} "
               f"(n={s['n']}, ${bet_size:.0f}/bet ROI {p['roi']:+.1%})")
+
+    # P&L SHAPE of the frozen book (fav>=floor): per-bet distribution + per-day series.
+    # The mean edge isn't enough — this is the tail (loss capped at -size; streak risk
+    # lives in the daily drawdown) and the $/day you'd actually experience.
+    rf = [(e, a, w) for e, a, w in day_bets if a >= min_fav_price]
+    rf_pnls = [p for p in (bet_pnl(a, w, bet_size) for _e, a, w in rf) if p is not None]
+    if rf_pnls:
+        wins = [p for p in rf_pnls if p > 0]
+        losses = [p for p in rf_pnls if p <= 0]
+        aw = sum(wins) / len(wins) if wins else 0.0
+        al = sum(losses) / len(losses) if losses else 0.0
+        print(f"\n  fav>={min_fav_price:.2f} book — per-bet shape (n={len(rf_pnls)}):")
+        print(f"    win-rate {len(wins) / len(rf_pnls):.0%}  avg win ${aw:+.2f}  avg loss "
+              f"${al:+.2f}  best ${max(rf_pnls):+.2f}  worst ${min(rf_pnls):+.2f}")
+        daily = daily_series(rf, bet_size)
+        dv = [p for _d, p in daily]
+        if dv:
+            dmean = sum(dv) / len(dv)
+            dstd = (sum((x - dmean) ** 2 for x in dv) / (len(dv) - 1)) ** 0.5 if len(dv) > 1 else 0.0
+            print(f"    per day ({len(dv)} days): avg ${dmean:+.2f}/day ±${dstd:.2f}  "
+                  f"best ${max(dv):+.2f}  worst ${min(dv):+.2f}  max drawdown ${max_drawdown(dv):.2f}")
+
     print("\n  +EV needs mean-2se>0; expect a week to show SPREADS+mechanics, not significance.")
 
 
