@@ -8,6 +8,7 @@ from scripts.weather_paper import (
     evaluate_ladder,
     mid_of,
     no_pnl,
+    open_position,
     rank_by_mid,
     simulate_portfolio,
     yes_pnl,
@@ -70,6 +71,22 @@ def test_agg():
     assert s["n"] == 4 and abs(s["mean"]) < 1e-9 and s["se"] > 0
     assert agg([]) == {"n": 0}
     assert agg([0.5])["se"] is None      # n=1, no se
+
+
+def test_open_position():
+    entry = [{"label": "30", "bid": 0.43, "ask": 0.45, "mid": 0.44},
+             {"label": "29", "bid": 0.20, "ask": 0.24, "mid": 0.22}]
+    latest = [{"label": "30", "bid": 0.53, "ask": 0.57, "mid": 0.55},
+              {"label": "29", "bid": 0.10, "ask": 0.14, "mid": 0.12}]
+    p = open_position(entry, latest, 5.0)               # bought "30" @0.45, now mid 0.55
+    assert p["held"] == "30" and p["entry_ask"] == 0.45
+    assert abs(p["shares"] - 5 / 0.45) < 1e-9
+    assert abs(p["unreal"] - (5 / 0.45 * 0.55 - 5)) < 1e-9   # +$1.11 unrealized
+    # held bucket absent from the latest snap -> can't mark -> unreal None
+    p2 = open_position(entry, [{"label": "29", "mid": 0.12}], 5.0)
+    assert p2["cur_mid"] is None and p2["unreal"] is None
+    # no ask at entry -> no position
+    assert open_position([{"label": "x", "bid": 0.1, "ask": None, "mid": 0.1}], latest, 5.0) is None
 
 
 def test_simulate_portfolio():

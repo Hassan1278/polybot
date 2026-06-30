@@ -28,6 +28,7 @@ import logging
 import math
 import os
 import time
+from collections import defaultdict
 
 from scripts.weather_pnl import parse_q
 from scripts.weather_recon import is_weather
@@ -133,6 +134,22 @@ def simulate_portfolio(bets, bankroll, bet_size):
             "roi": (pnl / staked) if staked else None, "final_equity": bankroll + pnl}
 
 
+def open_position(entry_buckets, latest_buckets, bet_size):
+    """An open paper position: we bought the favorite at the ENTRY snapshot's ask and still
+    hold it. Mark it at the held bucket's CURRENT mid (from the latest snapshot). Returns
+    {held, entry_ask, cur_mid, shares, unreal} or None if there was no entry ask."""
+    ranked = rank_by_mid(entry_buckets)
+    if not ranked or not ranked[0].get("ask"):
+        return None
+    held, entry_ask = ranked[0]["label"], ranked[0]["ask"]
+    cur = next((b for b in latest_buckets if b["label"] == held), None)
+    cur_mid = cur["mid"] if cur else None
+    shares = bet_size / entry_ask
+    unreal = (shares * cur_mid - bet_size) if cur_mid is not None else None
+    return {"held": held, "entry_ask": entry_ask, "cur_mid": cur_mid,
+            "shares": shares, "unreal": unreal}
+
+
 # ── store ──────────────────────────────────────────────────────────────────
 
 
@@ -154,7 +171,6 @@ def _save(path, store):
 async def _open_weather_ladders(within_hours):
     """Open weather ladders resolving within the window, grouped by (city,date,kind).
     Returns {key: [{label, cond_id, yes_token, end_ts}]}."""
-    from collections import defaultdict
     from datetime import datetime, timedelta, timezone
 
     from polybot.db import session_scope
@@ -269,13 +285,44 @@ async def report(store_path, conc, lead_hours, spread_tier, bankroll, bet_size):
     done = [s for s in store["snaps"] if s["resolved"] and s["winner"]]
     print(f"settled {settled} newly; {len(done)} resolved ladders in store "
           f"(of {len(store['snaps'])} snapshots)\n")
+
+    # OPEN POSITIONS — unresolved ladders we'd currently be holding (entered at the lead
+    # snapshot, marked at the held bucket's current mid). Shows BEFORE realized P&L so the
+    # morning check leads with "what's live".
+    open_by_key = defaultdict(list)
+    for s in store["snaps"]:
+        if not s["resolved"]:
+            open_by_key[s["key"]].append(s)
+    positions = []
+    for key, snaps in open_by_key.items():
+        ss = sorted(snaps, key=lambda s: s["snap_ts"])
+        entry = min(ss, key=lambda s: abs(s["hrs_to_end"] - lead_hours))
+        latest = ss[-1]
+        if latest["hrs_to_end"] >= entry["hrs_to_end"]:
+            continue                       # not yet past the entry lead -> not holding
+        pos = open_position(entry["buckets"], latest["buckets"], bet_size)
+        if pos and pos["unreal"] is not None:
+            positions.append((key, pos, latest["hrs_to_end"]))
+    if positions:
+        cost = len(positions) * bet_size
+        unreal = sum(p["unreal"] for _k, p, _h in positions)
+        print(f"===== OPEN POSITIONS — {len(positions)} held (favorite-YES, ${bet_size:.0f} each, "
+              f"marked at current mid) =====")
+        print(f"  cost ${cost:.0f}   unrealized P&L ${unreal:+.2f}")
+        for key, p, hrs in sorted(positions, key=lambda x: x[1]["unreal"])[:6]:
+            print(f"    {key:<32} {p['held']:<12} entry {p['entry_ask']:.2f} -> mid "
+                  f"{p['cur_mid']:.2f}  unreal ${p['unreal']:+.2f}  ({hrs:.0f}h left)")
+        if len(positions) > 6:
+            print(f"    … +{len(positions) - 6} more\n")
+        else:
+            print()
+
     if not done:
-        print("nothing resolved yet — run `snap` over a few days, then `report` again")
+        print("no ladders RESOLVED yet — realized scorecard needs settlements; check back later")
         return
 
     # per ladder-key, pick ONE snapshot: nearest to the target lead (for the price plays),
     # and the EARLIEST snapshot whose favorite crossed 85c (for the trigger play).
-    from collections import defaultdict
     by_key = defaultdict(list)
     for s in done:
         by_key[s["key"]].append(s)
