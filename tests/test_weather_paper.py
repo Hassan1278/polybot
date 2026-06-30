@@ -59,6 +59,15 @@ def test_evaluate_ladder():
     assert abs(ev["fade_longshots_no"] - 0.02) < 1e-9    # bid 0.02, longshot lost -> +0.02
 
 
+def test_evaluate_ladder_winner_none():
+    # the high landed in a bucket we didn't capture -> winner=None -> favorite LOST
+    buckets = [{"label": "30", "bid": 0.43, "ask": 0.45, "mid": 0.44},
+               {"label": "29", "bid": 0.28, "ask": 0.32, "mid": 0.30}]
+    ev = evaluate_ladder(buckets, None)
+    assert abs(ev["fav_yes"] + 0.45) < 1e-9          # favorite lost -> −ask
+    assert abs(ev["fade_rank2_no"] - 0.28) < 1e-9    # rank2 also lost -> NO wins +bid
+
+
 def test_evaluate_ladder_85c_subset():
     buckets = [{"label": "hi", "bid": 0.84, "ask": 0.86, "mid": 0.85},
                {"label": "lo", "bid": 0.10, "ask": 0.14, "mid": 0.12}]

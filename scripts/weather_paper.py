@@ -282,8 +282,12 @@ async def report(store_path, conc, lead_hours, spread_tier, bankroll, bet_size):
     store = _load(store_path)
     settled = await _settle(store, conc)
     _save(store_path, store)
-    done = [s for s in store["snaps"] if s["resolved"] and s["winner"]]
-    print(f"settled {settled} newly; {len(done)} resolved ladders in store "
+    # include winner=None resolved ladders: that means the high landed in a bucket we
+    # didn't capture, i.e. our favorite LOST — dropping these would hide real losses and
+    # overstate the edge. evaluate_ladder treats winner=None correctly (favorite = loss).
+    done = [s for s in store["snaps"] if s["resolved"]]
+    n_ladders = len({s["key"] for s in done})
+    print(f"settled {settled} newly; {n_ladders} resolved ladders in store "
           f"(of {len(store['snaps'])} snapshots)\n")
 
     # OPEN POSITIONS — unresolved ladders we'd currently be holding (entered at the lead
