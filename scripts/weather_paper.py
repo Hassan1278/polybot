@@ -334,6 +334,7 @@ async def report(store_path, conc, lead_hours, spread_tier, bankroll, bet_size):
     rows = defaultdict(list)            # strategy -> [pnl]
     liq = defaultdict(lambda: defaultdict(list))   # tier -> strategy -> [pnl]
     port_bets = []                       # (entry_ts, ask, won) for the bankroll sim
+    fav_records = []                     # (entry_ask, won) per favorite — for price-floor cuts
     n85 = 0
     for _key, snaps in by_key.items():
         winner = snaps[0]["winner"]
@@ -350,7 +351,9 @@ async def report(store_path, conc, lead_hours, spread_tier, bankroll, bet_size):
                 rows["fav_yes_85c_trigger"].append(ev85["fav_yes"])
         fav = rank_by_mid(at_lead["buckets"])
         if fav and fav[0]["ask"] is not None:
-            port_bets.append((at_lead["snap_ts"], fav[0]["ask"], fav[0]["label"] == winner))
+            won_fav = fav[0]["label"] == winner
+            port_bets.append((at_lead["snap_ts"], fav[0]["ask"], won_fav))
+            fav_records.append((fav[0]["ask"], won_fav))
         tier = "liquid (spread<=3c)" if (fav and fav[0]["ask"] is not None
                and fav[0]["bid"] is not None and (fav[0]["ask"] - fav[0]["bid"]) <= spread_tier) \
                else "illiquid (spread>3c)"
@@ -396,6 +399,20 @@ async def report(store_path, conc, lead_hours, spread_tier, bankroll, bet_size):
     if port["n"]:
         print(f"  bets {port['n']}  staked ${port['staked']:.0f}  realized P&L "
               f"${port['pnl']:+.2f}  ROI {port['roi']:+.1%}  ->  equity ${port['final_equity']:.2f}")
+
+    # only bet when the favorite is a REAL favorite — a price floor drops the junk cases
+    # where the top captured bucket is priced ~0 (flat/thin ladder = a longshot, not a bet).
+    print("\n  favorite-YES with a price floor (skip 'favorites' priced below the floor):")
+    for floor in (0.0, 0.25, 0.40):
+        kept = [(a, w) for a, w in fav_records if a >= floor]
+        s = agg([w - a for a, w in kept])
+        if not s.get("n"):
+            print(f"    fav>={floor:.2f}: (no bets)")
+            continue
+        p = simulate_portfolio(kept, bankroll, bet_size)
+        twose = f"±{2 * s['se']:.3f}" if s["se"] else ""
+        print(f"    fav>={floor:.2f}: edge {s['mean']:+.3f}/$1 {twose:<9} "
+              f"(n={s['n']}, ${bet_size:.0f}/bet ROI {p['roi']:+.1%})")
     print("\n  +EV needs mean-2se>0; expect a week to show SPREADS+mechanics, not significance.")
 
 
