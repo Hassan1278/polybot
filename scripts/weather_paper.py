@@ -278,7 +278,7 @@ async def _settle(store, conc):
     return settled
 
 
-async def report(store_path, conc, lead_hours, spread_tier, bankroll, bet_size):
+async def report(store_path, conc, lead_hours, spread_tier, bankroll, bet_size, min_fav_price):
     store = _load(store_path)
     settled = await _settle(store, conc)
     _save(store_path, store)
@@ -305,7 +305,7 @@ async def report(store_path, conc, lead_hours, spread_tier, bankroll, bet_size):
         if latest["hrs_to_end"] >= entry["hrs_to_end"]:
             continue                       # not yet past the entry lead -> not holding
         pos = open_position(entry["buckets"], latest["buckets"], bet_size)
-        if pos and pos["unreal"] is not None:
+        if pos and pos["unreal"] is not None and pos["entry_ask"] >= min_fav_price:
             positions.append((key, pos, latest["hrs_to_end"]))
     if positions:
         cost = len(positions) * bet_size
@@ -391,11 +391,13 @@ async def report(store_path, conc, lead_hours, spread_tier, bankroll, bet_size):
                     pnls.append(ev["fav_yes"])
         line(f"entry @{lead:>2}h ", pnls)
 
-    # the actual $ book: favorite-YES, tiny size, full breadth
+    # the actual $ book: favorite-YES, tiny size, full breadth, REAL favorites only
+    # (frozen floor — a 'favorite' priced below it is a longshot, not a bet).
     port_bets.sort(key=lambda b: b[0])
-    port = simulate_portfolio([(a, w) for _ts, a, w in port_bets], bankroll, bet_size)
-    print(f"\n===== PAPER PORTFOLIO — favorite-YES, ${bet_size:.0f}/bet, ${bankroll:.0f} bankroll, "
-          f"entry≈{lead_hours:.0f}h =====")
+    port = simulate_portfolio([(a, w) for _ts, a, w in port_bets if a >= min_fav_price],
+                              bankroll, bet_size)
+    print(f"\n===== PAPER PORTFOLIO — favorite-YES (fav>={min_fav_price:.2f}), ${bet_size:.0f}/bet, "
+          f"${bankroll:.0f} bankroll, entry≈{lead_hours:.0f}h =====")
     if port["n"]:
         print(f"  bets {port['n']}  staked ${port['staked']:.0f}  realized P&L "
               f"${port['pnl']:+.2f}  ROI {port['roi']:+.1%}  ->  equity ${port['final_equity']:.2f}")
@@ -403,7 +405,7 @@ async def report(store_path, conc, lead_hours, spread_tier, bankroll, bet_size):
     # only bet when the favorite is a REAL favorite — a price floor drops the junk cases
     # where the top captured bucket is priced ~0 (flat/thin ladder = a longshot, not a bet).
     print("\n  favorite-YES with a price floor (skip 'favorites' priced below the floor):")
-    for floor in (0.0, 0.25, 0.40):
+    for floor in (0.0, 0.25, 0.30, 0.40):
         kept = [(a, w) for a, w in fav_records if a >= floor]
         s = agg([w - a for a, w in kept])
         if not s.get("n"):
@@ -427,13 +429,15 @@ def main():
     ap.add_argument("--spread-tier", type=float, default=0.03, help="liquid/illiquid split on favorite spread")
     ap.add_argument("--bankroll", type=float, default=2000.0, help="paper bankroll for the portfolio sim")
     ap.add_argument("--bet-size", type=float, default=5.0, help="$ staked per favorite bet (tiny vs bankroll)")
+    ap.add_argument("--min-fav-price", type=float, default=0.30,
+                    help="FROZEN floor: only bet a favorite priced >= this (a real favorite, not a longshot)")
     ap.add_argument("--conc", type=int, default=8, help="concurrent CLOB/gamma calls")
     args = ap.parse_args()
     if args.mode == "snap":
         asyncio.run(snap(args.store, args.within_hours, args.conc))
     else:
         asyncio.run(report(args.store, args.conc, args.lead_hours, args.spread_tier,
-                           args.bankroll, args.bet_size))
+                           args.bankroll, args.bet_size, args.min_fav_price))
 
 
 if __name__ == "__main__":
